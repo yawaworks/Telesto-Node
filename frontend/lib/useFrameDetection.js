@@ -3,18 +3,17 @@
 import { useEffect, useRef, useState } from "react";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
-const CAPTURE_INTERVAL_MS = 800; // ~1.25 fps — plenty for demo purposes, easy on the backend
+const CAPTURE_INTERVAL_MS = 800;
+// Lowered temporarily to 0.15 to help confirm the model is actually firing
+// on more frames while it's still lightly trained. Raise back toward 0.35+
+// once you have a better-trained model or want fewer false positives.
+const CONF_THRESHOLD = 0.15;
 
-/**
- * Periodically captures the current frame from a <video> element, POSTs it
- * to the FastAPI /analyze-frame endpoint, and returns the latest bounding
- * boxes, frame-level coral bleaching ratio, and connection status.
- */
 export function useFrameDetection(videoRef, { enabled = true } = {}) {
   const [boxes, setBoxes] = useState([]);
   const [coralBleachingRatio, setCoralBleachingRatio] = useState(null);
-  const [status, setStatus] = useState("idle"); // idle | connecting | live | error
-  const canvasRef = useRef(null); // offscreen canvas used only for capture, not rendering
+  const [status, setStatus] = useState("idle");
+  const canvasRef = useRef(null);
   const inFlightRef = useRef(false);
 
   useEffect(() => {
@@ -49,10 +48,13 @@ export function useFrameDetection(videoRef, { enabled = true } = {}) {
 
         setStatus((prev) => (prev === "live" ? "live" : "connecting"));
 
-        const response = await fetch(`${API_BASE_URL}/analyze-frame`, {
-          method: "POST",
-          body: formData,
-        });
+        const response = await fetch(
+          `${API_BASE_URL}/analyze-frame?conf_threshold=${CONF_THRESHOLD}`,
+          {
+            method: "POST",
+            body: formData,
+          }
+        );
 
         if (!response.ok) throw new Error(`Backend returned ${response.status}`);
 
