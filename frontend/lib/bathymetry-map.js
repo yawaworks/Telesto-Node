@@ -1,0 +1,74 @@
+/**
+ * Initializes the 3D ocean bathymetry map using MapLibre GL JS with
+ * OpenFreeMap's free vector tiles + a free terrain-DEM source — no API key
+ * or payment method required.
+ *
+ * Uses the CDN-loaded window.maplibregl global (see app/layout.js) rather
+ * than the npm package, since bundling it through Next.js's dev webpack
+ * caused its internal tile-parsing worker to silently fail.
+ */
+export function initBathymetryMap(container) {
+  if (!container) return null;
+  if (typeof window === "undefined" || !window.maplibregl) {
+    console.error("maplibregl global not found — check that the CDN script in layout.js loaded.");
+    return null;
+  }
+
+  const maplibregl = window.maplibregl;
+
+  const map = new maplibregl.Map({
+    container,
+    style: "https://tiles.openfreemap.org/styles/liberty",
+    center: [145.7781, -16.9203], // Cairns, Australia — coastline + Great Barrier Reef in view
+    zoom: 9.5,
+    pitch: 70,
+    bearing: 45,
+    antialias: true,
+  });
+
+  map.on("load", () => {
+    // 3D terrain DEM source (free Terrarium tiles via AWS open data)
+    map.addSource("terrain-dem", {
+      type: "raster-dem",
+      tiles: [
+        "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png",
+      ],
+      tileSize: 256,
+      encoding: "terrarium",
+      maxzoom: 15,
+    });
+    map.setTerrain({ source: "terrain-dem", exaggeration: 2.5 });
+
+    // Atmosphere / depth fog for a submarine-mission feel
+    map.setFog({
+      color: "rgb(6, 20, 30)",
+      "high-color": "rgb(10, 40, 60)",
+      "horizon-blend": 0.35,
+      "space-color": "rgb(0, 5, 10)",
+      "star-intensity": 0.2,
+    });
+
+    // Empty source to start; populate with OBIS/detection points at runtime
+    if (!map.getSource("risk-points")) {
+      map.addSource("risk-points", {
+        type: "geojson",
+        data: { type: "FeatureCollection", features: [] },
+      });
+    }
+
+    // Glowing risk marker layer (invasive species / bleaching alerts)
+    map.addLayer({
+      id: "risk-markers",
+      type: "circle",
+      source: "risk-points",
+      paint: {
+        "circle-radius": 8,
+        "circle-color": "#ff5470",
+        "circle-blur": 0.6,
+        "circle-opacity": 0.85,
+      },
+    });
+  });
+
+  return map;
+}
