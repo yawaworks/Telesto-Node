@@ -13,10 +13,12 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from app.inference import clahe_correct, coral_bleaching_ratio, predict_with_roboflow
 from app.obis_client import fetch_obis_species_data
+from app.report import generate_mission_report, log_detections
 
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 
@@ -73,9 +75,10 @@ def health():
 
 @app.post("/analyze-frame", response_model=FrameAnalysisResponse)
 async def analyze_frame(file: UploadFile = File(...), conf_threshold: float = 0.2):
-    """Runs every enabled Roboflow model against this frame (your own fish
-    model, the marine-fishes species model, coral-lifeform segmentation, and
-    the coral bleach classifier), merging results into one response."""
+    """Runs every enabled Roboflow model against this frame (marine-fishes
+    species detection + the coral bleach classifier by default), merging
+    results into one response, and logs the detections for the mission
+    report export."""
     raw_bytes = await file.read()
     np_arr = np.frombuffer(raw_bytes, np.uint8)
     frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -90,8 +93,6 @@ async def analyze_frame(file: UploadFile = File(...), conf_threshold: float = 0.
     boxes = [BoundingBox(**b) for b in result["boxes"]]
     classifications = [Classification(**c) for c in result["classifications"]]
 
-    # Prefer the dedicated bleach classifier's verdict if it fired; otherwise
-    # fall back to the pixel-heuristic averaged over any coral-labeled boxes.
     bleach_result = next(
         (c for c in classifications if c.source == "coral_bleach"), None
     )
@@ -110,8 +111,37 @@ async def analyze_frame(file: UploadFile = File(...), conf_threshold: float = 0.
         else:
             frame_ratio = None
 
+    log_detections(result["boxes"], frame_ratio)
+
     return FrameAnalysisResponse(
         boxes=boxes, classifications=classifications, coral_bleaching_ratio=frame_ratio
+    )
+
+
+@app.get("/export-report")
+async def export_report(
+    depth: str = "42.6 m",
+    coords: str = "11.3500 N, 144.2400 E",
+    temp: str = "17.2°C",
+    salinity: str = "34.9 PSU",
+    heading: str = "086°",
+):
+    """Generates a PDF mission report summarizing every species detected and
+    the average coral bleaching reading logged so far this session."""
+    telemetry = {
+        "depth": depth,
+        "coords": coords,
+        "temp": temp,
+        "salinity": salinity,
+        "heading": heading,
+    }
+    pdf_bytes = generate_mission_report(telemetry)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": 'attachment; filename="telesto-node-mission-report.pdf"'
+        },
     )
 
 

@@ -7,6 +7,7 @@ import { loadSpeciesMarkers } from "../lib/species-markers";
 import { useFrameDetection } from "../lib/useFrameDetection";
 import DetectionOverlay from "../components/DetectionOverlay";
 
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
 const BLEACHING_ALERT_THRESHOLD = 0.4;
 const DEFAULT_SPECIES = "Acropora cervicornis";
 
@@ -22,7 +23,8 @@ export default function MissionControl() {
     heading: "086°",
   });
   const [speciesQuery, setSpeciesQuery] = useState(DEFAULT_SPECIES);
-  const [viewMode, setViewMode] = useState("video"); // "video" | "map"
+  const [viewMode, setViewMode] = useState("video");
+  const [exportingReport, setExportingReport] = useState(false);
 
   const { boxes, coralBleachingRatio, status } = useFrameDetection(videoRef, {
     enabled: viewMode === "video",
@@ -55,11 +57,33 @@ export default function MissionControl() {
     }
   }
 
+  async function handleExportReport() {
+    setExportingReport(true);
+    try {
+      const params = new URLSearchParams(telemetry);
+      const response = await fetch(`${API_BASE_URL}/export-report?${params}`);
+      if (!response.ok) throw new Error(`Export failed: ${response.status}`);
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "telesto-node-mission-report.pdf";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Report export failed:", err);
+    } finally {
+      setExportingReport(false);
+    }
+  }
+
   const isMapMode = viewMode === "map";
 
   return (
     <div className="relative w-full h-screen overflow-hidden bg-black text-cyan-200">
-      {/* ROV video feed */}
       <video
         ref={videoRef}
         id="feed"
@@ -72,10 +96,8 @@ export default function MissionControl() {
         style={{ opacity: isMapMode ? 0 : 1 }}
       />
 
-      {/* Live YOLO bounding box overlay */}
       <DetectionOverlay videoRef={videoRef} boxes={isMapMode ? [] : boxes} />
 
-      {/* 3D bathymetry map with species markers */}
       <div
         ref={mapContainerRef}
         className="absolute inset-0 w-full h-full"
@@ -85,7 +107,6 @@ export default function MissionControl() {
         }}
       />
 
-      {/* Glassmorphism HUD overlay */}
       <div className="absolute inset-0 pointer-events-none">
         <div className="absolute top-4 left-4 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-4 py-2 shadow-[0_0_15px_rgba(34,211,238,0.25)]">
           <p className="text-xs uppercase tracking-widest text-cyan-400">Depth</p>
@@ -97,7 +118,6 @@ export default function MissionControl() {
           <p className="text-sm">{telemetry.coords}</p>
         </div>
 
-        {/* View mode toggle (video feed vs. bathymetry map) */}
         <div className="absolute top-4 left-1/2 -translate-x-1/2 pointer-events-auto flex gap-2">
           <button
             onClick={() => setViewMode("video")}
@@ -121,7 +141,6 @@ export default function MissionControl() {
           </button>
         </div>
 
-        {/* Inference connection status badge (video mode only) */}
         {!isMapMode && (
           <div className="absolute top-16 left-1/2 -translate-x-1/2 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-4 py-1 flex items-center gap-2">
             <span
@@ -139,7 +158,6 @@ export default function MissionControl() {
           </div>
         )}
 
-        {/* Species search box (map mode only) */}
         {isMapMode && (
           <form
             onSubmit={handleSpeciesSearch}
@@ -161,6 +179,22 @@ export default function MissionControl() {
           </form>
         )}
 
+        {/* Export Field Report button */}
+        <button
+          onClick={handleExportReport}
+          disabled={exportingReport}
+          className="absolute top-4 right-56 pointer-events-auto backdrop-blur-md bg-cyan-400/10 border border-cyan-400/40 rounded-xl px-4 py-2 text-xs uppercase tracking-widest hover:bg-cyan-400/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+        >
+          {exportingReport ? (
+            <>
+              <span className="w-2 h-2 rounded-full bg-cyan-300 animate-pulse" />
+              Generating…
+            </>
+          ) : (
+            <>Export Field Report</>
+          )}
+        </button>
+
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-6 py-2 flex gap-6">
           <span>
             TEMP <span className="text-cyan-300">{telemetry.temp}</span>
@@ -181,12 +215,10 @@ export default function MissionControl() {
           )}
         </div>
 
-        {/* Targeting reticle (video mode only) */}
         {!isMapMode && (
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-16 h-16 border border-cyan-400/60 rounded-full animate-pulse" />
         )}
 
-        {/* Live alert badge */}
         {!isMapMode && alert && (
           <div className="absolute bottom-4 right-4 backdrop-blur-md bg-red-500/10 border border-red-400/50 text-red-300 rounded-xl px-4 py-2 animate-pulse">
             ⚠ Coral Bleaching Detected
@@ -194,7 +226,6 @@ export default function MissionControl() {
         )}
       </div>
 
-      {/* CRT scanline texture */}
       <div className="crt-scanlines absolute inset-0 pointer-events-none opacity-10" />
     </div>
   );

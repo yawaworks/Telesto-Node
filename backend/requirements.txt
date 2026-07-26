@@ -1,7 +1,6 @@
 fastapi==0.115.0
 uvicorn[standard]==0.30.6
 python-multipart==0.0.9
-ultralytics==8.2.103
 opencv-python-headless==4.10.0.84
 numpy==1.26.4
 requests==2.32.3
@@ -9,3 +8,4 @@ pandas==2.2.2
 pymongo==4.8.0
 python-dotenv==1.0.1
 websockets==13.1
+reportlab==4.4.10
