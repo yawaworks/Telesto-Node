@@ -1,14 +1,16 @@
+import math
 import os
 from typing import List, Optional
 
 import cv2
 import numpy as np
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from app.inference import clahe_correct, coral_bleaching_ratio, get_model
+from app.obis_client import fetch_obis_species_data
 
 load_dotenv()
 
@@ -24,9 +26,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Labels (from any model you load) that should be treated as coral for the
-# bleaching heuristic. Stock COCO weights won't match any of these — this
-# list is meant for your fine-tuned marine model's class names.
 CORAL_LABELS = {"coral", "healthy_coral", "bleached_coral", "coral_reef"}
 
 
@@ -37,14 +36,26 @@ class BoundingBox(BaseModel):
     y1: int
     x2: int
     y2: int
-    bleaching_ratio: Optional[float] = None  # 0.0 (healthy) - 1.0 (fully bleached)
+    bleaching_ratio: Optional[float] = None
 
 
 class FrameAnalysisResponse(BaseModel):
     boxes: List[BoundingBox]
-    # Average bleaching ratio across all coral detections in this frame,
-    # None if no coral was detected.
     coral_bleaching_ratio: Optional[float] = None
+
+
+def _clean(value):
+    """Convert NumPy scalars to native Python types and NaN/None to None,
+    so the value is always safely JSON-serializable."""
+    if value is None:
+        return None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+    if hasattr(value, "item"):  # numpy scalar (float64, int64, etc.)
+        value = value.item()
+        if isinstance(value, float) and math.isnan(value):
+            return None
+    return value
 
 
 @app.get("/health")
@@ -75,7 +86,6 @@ async def analyze_frame(file: UploadFile = File(...), conf_threshold: float = 0.
 
         ratio = None
         if label.lower() in CORAL_LABELS:
-            # Crop just this detection and run the bleaching heuristic on it
             crop = frame[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
             if crop.size > 0:
                 ratio = coral_bleaching_ratio(crop)
@@ -100,6 +110,43 @@ async def analyze_frame(file: UploadFile = File(...), conf_threshold: float = 0.
     return FrameAnalysisResponse(boxes=boxes, coral_bleaching_ratio=frame_ratio)
 
 
+@app.get("/species-data")
+async def species_data(scientific_name: str, max_records: int = 200):
+    """Returns OBIS species occurrence records as a GeoJSON FeatureCollection,
+    ready to drop straight into a MapLibre/Mapbox GeoJSON source."""
+    df = fetch_obis_species_data(scientific_name, max_records=max_records)
+
+    if df is None or df.empty:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No OBIS records found for '{scientific_name}'",
+        )
+
+    features = []
+    for _, row in df.iterrows():
+        lat = _clean(row["latitude"])
+        lng = _clean(row["longitude"])
+        if lat is None or lng is None:
+            continue  # skip records with no usable coordinates
+
+        features.append(
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [lng, lat],
+                },
+                "properties": {
+                    "scientificName": _clean(row.get("scientificName")),
+                    "depth_meters": _clean(row.get("depth_meters")),
+                    "country": _clean(row.get("country")),
+                },
+            }
+        )
+
+    return {"type": "FeatureCollection", "features": features}
+
+
 @app.websocket("/ws/telemetry")
 async def telemetry_socket(websocket: WebSocket):
     """Live telemetry stream stub (depth, temp, salinity, alerts) for the HUD."""
@@ -107,7 +154,6 @@ async def telemetry_socket(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_json()
-            # Echo/broadcast logic goes here once real sensor/ROV data is wired up
             await websocket.send_json({"received": data})
     except WebSocketDisconnect:
         pass
