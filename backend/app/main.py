@@ -2,17 +2,20 @@ import math
 import os
 from typing import List, Optional
 
+from dotenv import load_dotenv
+
+# Must run BEFORE importing app.inference, since that module reads
+# ROBOFLOW_API_KEY from the environment at import time.
+load_dotenv()
+
 import cv2
 import numpy as np
-from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from app.inference import clahe_correct, coral_bleaching_ratio, get_model
+from app.inference import clahe_correct, coral_bleaching_ratio, predict_with_roboflow
 from app.obis_client import fetch_obis_species_data
-
-load_dotenv()
 
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 
@@ -45,13 +48,11 @@ class FrameAnalysisResponse(BaseModel):
 
 
 def _clean(value):
-    """Convert NumPy scalars to native Python types and NaN/None to None,
-    so the value is always safely JSON-serializable."""
     if value is None:
         return None
     if isinstance(value, float) and math.isnan(value):
         return None
-    if hasattr(value, "item"):  # numpy scalar (float64, int64, etc.)
+    if hasattr(value, "item"):
         value = value.item()
         if isinstance(value, float) and math.isnan(value):
             return None
@@ -65,24 +66,23 @@ def health():
 
 @app.post("/analyze-frame", response_model=FrameAnalysisResponse)
 async def analyze_frame(file: UploadFile = File(...), conf_threshold: float = 0.35):
-    """Accepts a single video frame (image bytes), returns YOLO bounding boxes
-    plus a per-box and frame-level coral bleaching ratio wherever coral is detected."""
     raw_bytes = await file.read()
     np_arr = np.frombuffer(raw_bytes, np.uint8)
     frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
     frame = clahe_correct(frame)
 
-    model = get_model()
-    results = model.predict(frame, conf=conf_threshold, verbose=False)[0]
+    try:
+        detections = predict_with_roboflow(frame, conf_threshold=conf_threshold)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Roboflow inference failed: {exc}")
 
     boxes = []
     bleaching_ratios = []
 
-    for box in results.boxes:
-        x1, y1, x2, y2 = map(int, box.xyxy[0])
-        label = model.names[int(box.cls[0])]
-        score = float(box.conf[0])
+    for det in detections:
+        label = det["label"]
+        x1, y1, x2, y2 = det["x1"], det["y1"], det["x2"], det["y2"]
 
         ratio = None
         if label.lower() in CORAL_LABELS:
@@ -94,7 +94,7 @@ async def analyze_frame(file: UploadFile = File(...), conf_threshold: float = 0.
         boxes.append(
             BoundingBox(
                 label=label,
-                confidence=score,
+                confidence=det["confidence"],
                 x1=x1,
                 y1=y1,
                 x2=x2,
@@ -112,8 +112,6 @@ async def analyze_frame(file: UploadFile = File(...), conf_threshold: float = 0.
 
 @app.get("/species-data")
 async def species_data(scientific_name: str, max_records: int = 200):
-    """Returns OBIS species occurrence records as a GeoJSON FeatureCollection,
-    ready to drop straight into a MapLibre/Mapbox GeoJSON source."""
     df = fetch_obis_species_data(scientific_name, max_records=max_records)
 
     if df is None or df.empty:
@@ -127,7 +125,7 @@ async def species_data(scientific_name: str, max_records: int = 200):
         lat = _clean(row["latitude"])
         lng = _clean(row["longitude"])
         if lat is None or lng is None:
-            continue  # skip records with no usable coordinates
+            continue
 
         features.append(
             {
@@ -149,7 +147,6 @@ async def species_data(scientific_name: str, max_records: int = 200):
 
 @app.websocket("/ws/telemetry")
 async def telemetry_socket(websocket: WebSocket):
-    """Live telemetry stream stub (depth, temp, salinity, alerts) for the HUD."""
     await websocket.accept()
     try:
         while True:
