@@ -3,43 +3,32 @@
 import { useEffect, useRef, useState } from "react";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
-const CAPTURE_INTERVAL_MS = 800;
+// Every 2 model calls per frame now (marine-fishes + bleach classifier), so
+// space captures out more to conserve Roboflow credits.
+const CAPTURE_INTERVAL_MS = 2500;
 const CONF_THRESHOLD = 0.2;
 
-// Temporal smoothing settings:
-// - If a frame comes back with NO detections, keep showing the last known
-//   boxes for up to HOLD_FRAMES more cycles before clearing (handles brief
-//   missed detections on a fish that's clearly still there).
-// - A label only "counts" as confirmed once it's appeared in at least
-//   MIN_CONSECUTIVE_HITS out of the last few frames, cutting down on
-//   single-frame flicker/misfires.
-const HOLD_FRAMES = 2; // ~1.6s grace period at 800ms interval
-const MIN_CONSECUTIVE_HITS = 2;
+const HOLD_FRAMES = 3;
+const MIN_CONSECUTIVE_HITS = 1;
 const HISTORY_LENGTH = 3;
+const MATCH_DISTANCE_PX = 250;
 
-/**
- * Groups nearby boxes across frames by rough position so we can track
- * "the same detection" over time even if exact coordinates shift slightly.
- */
 function centerOf(box) {
   return [(box.x1 + box.x2) / 2, (box.y1 + box.y2) / 2];
 }
-
 function distance(a, b) {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
 }
 
-const MATCH_DISTANCE_PX = 80; // how close two boxes' centers must be to count as "the same" detection across frames
-
 export function useFrameDetection(videoRef, { enabled = true } = {}) {
   const [boxes, setBoxes] = useState([]);
+  const [classifications, setClassifications] = useState([]);
   const [coralBleachingRatio, setCoralBleachingRatio] = useState(null);
   const [status, setStatus] = useState("idle");
   const canvasRef = useRef(null);
   const inFlightRef = useRef(false);
 
-  // Smoothing state (kept in refs so it doesn't trigger extra re-renders)
-  const historyRef = useRef([]); // last few frames' raw boxes
+  const historyRef = useRef([]);
   const lastGoodBoxesRef = useRef([]);
   const missedFramesRef = useRef(0);
 
@@ -58,10 +47,9 @@ export function useFrameDetection(videoRef, { enabled = true } = {}) {
       if (historyRef.current.length > HISTORY_LENGTH) {
         historyRef.current.shift();
       }
+      if (MIN_CONSECUTIVE_HITS <= 1) return rawBoxes;
 
-      // For each box in the newest frame, count how many of the recent
-      // frames had a box in roughly the same place with the same label.
-      const confirmed = rawBoxes.filter((box) => {
+      return rawBoxes.filter((box) => {
         const center = centerOf(box);
         let hits = 0;
         for (const frame of historyRef.current) {
@@ -72,8 +60,6 @@ export function useFrameDetection(videoRef, { enabled = true } = {}) {
         }
         return hits >= MIN_CONSECUTIVE_HITS;
       });
-
-      return confirmed;
     }
 
     async function captureAndSend() {
@@ -100,10 +86,7 @@ export function useFrameDetection(videoRef, { enabled = true } = {}) {
 
         const response = await fetch(
           `${API_BASE_URL}/analyze-frame?conf_threshold=${CONF_THRESHOLD}`,
-          {
-            method: "POST",
-            body: formData,
-          }
+          { method: "POST", body: formData }
         );
 
         if (!response.ok) throw new Error(`Backend returned ${response.status}`);
@@ -119,8 +102,6 @@ export function useFrameDetection(videoRef, { enabled = true } = {}) {
           missedFramesRef.current = 0;
           setBoxes(smoothed);
         } else if (rawBoxes.length === 0 && missedFramesRef.current < HOLD_FRAMES) {
-          // Nothing detected this frame — hold the last known boxes briefly
-          // rather than instantly blanking, in case it's a momentary miss.
           missedFramesRef.current += 1;
           setBoxes(lastGoodBoxesRef.current);
         } else {
@@ -129,6 +110,7 @@ export function useFrameDetection(videoRef, { enabled = true } = {}) {
           setBoxes([]);
         }
 
+        setClassifications(data.classifications || []);
         setCoralBleachingRatio(
           data.coral_bleaching_ratio === undefined ? null : data.coral_bleaching_ratio
         );
@@ -151,5 +133,5 @@ export function useFrameDetection(videoRef, { enabled = true } = {}) {
     };
   }, [videoRef, enabled]);
 
-  return { boxes, coralBleachingRatio, status };
+  return { boxes, classifications, coralBleachingRatio, status };
 }

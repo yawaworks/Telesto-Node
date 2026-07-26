@@ -1,12 +1,13 @@
 import math
-import os
 from typing import List, Optional
 
 from dotenv import load_dotenv
 
 # Must run BEFORE importing app.inference, since that module reads
-# ROBOFLOW_API_KEY from the environment at import time.
+# ROBOFLOW_API_KEY (and model IDs) from the environment at import time.
 load_dotenv()
+
+import os
 
 import cv2
 import numpy as np
@@ -29,8 +30,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CORAL_LABELS = {"coral", "healthy_coral", "bleached_coral", "coral_reef"}
-
 
 class BoundingBox(BaseModel):
     label: str
@@ -39,11 +38,19 @@ class BoundingBox(BaseModel):
     y1: int
     x2: int
     y2: int
+    source: Optional[str] = None
     bleaching_ratio: Optional[float] = None
+
+
+class Classification(BaseModel):
+    source: str
+    label: str
+    confidence: float
 
 
 class FrameAnalysisResponse(BaseModel):
     boxes: List[BoundingBox]
+    classifications: List[Classification] = []
     coral_bleaching_ratio: Optional[float] = None
 
 
@@ -65,7 +72,10 @@ def health():
 
 
 @app.post("/analyze-frame", response_model=FrameAnalysisResponse)
-async def analyze_frame(file: UploadFile = File(...), conf_threshold: float = 0.35):
+async def analyze_frame(file: UploadFile = File(...), conf_threshold: float = 0.2):
+    """Runs every enabled Roboflow model against this frame (your own fish
+    model, the marine-fishes species model, coral-lifeform segmentation, and
+    the coral bleach classifier), merging results into one response."""
     raw_bytes = await file.read()
     np_arr = np.frombuffer(raw_bytes, np.uint8)
     frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -73,41 +83,36 @@ async def analyze_frame(file: UploadFile = File(...), conf_threshold: float = 0.
     frame = clahe_correct(frame)
 
     try:
-        detections = predict_with_roboflow(frame, conf_threshold=conf_threshold)
+        result = predict_with_roboflow(frame, conf_threshold=conf_threshold)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Roboflow inference failed: {exc}")
 
-    boxes = []
-    bleaching_ratios = []
+    boxes = [BoundingBox(**b) for b in result["boxes"]]
+    classifications = [Classification(**c) for c in result["classifications"]]
 
-    for det in detections:
-        label = det["label"]
-        x1, y1, x2, y2 = det["x1"], det["y1"], det["x2"], det["y2"]
-
-        ratio = None
-        if label.lower() in CORAL_LABELS:
-            crop = frame[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
-            if crop.size > 0:
-                ratio = coral_bleaching_ratio(crop)
-                bleaching_ratios.append(ratio)
-
-        boxes.append(
-            BoundingBox(
-                label=label,
-                confidence=det["confidence"],
-                x1=x1,
-                y1=y1,
-                x2=x2,
-                y2=y2,
-                bleaching_ratio=ratio,
-            )
-        )
-
-    frame_ratio = (
-        sum(bleaching_ratios) / len(bleaching_ratios) if bleaching_ratios else None
+    # Prefer the dedicated bleach classifier's verdict if it fired; otherwise
+    # fall back to the pixel-heuristic averaged over any coral-labeled boxes.
+    bleach_result = next(
+        (c for c in classifications if c.source == "coral_bleach"), None
     )
+    if bleach_result is not None:
+        is_bleached = "bleach" in bleach_result.label.lower()
+        frame_ratio = bleach_result.confidence if is_bleached else 1 - bleach_result.confidence
+    else:
+        coral_boxes = [b for b in boxes if "coral" in b.label.lower()]
+        if coral_boxes:
+            ratios = []
+            for b in coral_boxes:
+                crop = frame[max(0, b.y1):max(0, b.y2), max(0, b.x1):max(0, b.x2)]
+                if crop.size > 0:
+                    ratios.append(coral_bleaching_ratio(crop))
+            frame_ratio = sum(ratios) / len(ratios) if ratios else None
+        else:
+            frame_ratio = None
 
-    return FrameAnalysisResponse(boxes=boxes, coral_bleaching_ratio=frame_ratio)
+    return FrameAnalysisResponse(
+        boxes=boxes, classifications=classifications, coral_bleaching_ratio=frame_ratio
+    )
 
 
 @app.get("/species-data")
@@ -130,10 +135,7 @@ async def species_data(scientific_name: str, max_records: int = 200):
         features.append(
             {
                 "type": "Feature",
-                "geometry": {
-                    "type": "Point",
-                    "coordinates": [lng, lat],
-                },
+                "geometry": {"type": "Point", "coordinates": [lng, lat]},
                 "properties": {
                     "scientificName": _clean(row.get("scientificName")),
                     "depth_meters": _clean(row.get("depth_meters")),
