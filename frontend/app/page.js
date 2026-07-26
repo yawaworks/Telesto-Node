@@ -3,6 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import { initGamepadNavigation } from "../lib/gamepad-controller";
 import { initBathymetryMap } from "../lib/bathymetry-map";
+import { useFrameDetection } from "../lib/useFrameDetection";
+import DetectionOverlay from "../components/DetectionOverlay";
+
+// Above this fraction of a coral detection's pixels reading as bleached,
+// trigger the HUD alert. Tune against real footage once you have it.
+const BLEACHING_ALERT_THRESHOLD = 0.4;
 
 export default function MissionControl() {
   const videoRef = useRef(null);
@@ -14,7 +20,11 @@ export default function MissionControl() {
     salinity: "34.9 PSU",
     heading: "086°",
   });
-  const [alert, setAlert] = useState(false);
+
+  const { boxes, coralBleachingRatio, status } = useFrameDetection(videoRef, { enabled: true });
+
+  const alert =
+    coralBleachingRatio !== null && coralBleachingRatio >= BLEACHING_ALERT_THRESHOLD;
 
   useEffect(() => {
     const map = initBathymetryMap(mapContainerRef.current);
@@ -33,12 +43,18 @@ export default function MissionControl() {
         ref={videoRef}
         id="feed"
         className="absolute inset-0 w-full h-full object-cover"
+        src="/rov-feed.mp4"
         autoPlay
         muted
+        loop
+        playsInline
       />
 
-      {/* 3D bathymetry map */}
-      <div ref={mapContainerRef} className="absolute inset-0 w-full h-full" />
+      {/* Live YOLO bounding box overlay */}
+      <DetectionOverlay videoRef={videoRef} boxes={boxes} />
+
+      {/* 3D bathymetry map (behind HUD, toggle visibility as needed) */}
+      <div ref={mapContainerRef} className="absolute inset-0 w-full h-full opacity-0 pointer-events-none" />
 
       {/* Glassmorphism HUD overlay */}
       <div className="absolute inset-0 pointer-events-none">
@@ -52,6 +68,22 @@ export default function MissionControl() {
           <p className="text-sm">{telemetry.coords}</p>
         </div>
 
+        {/* Inference connection status badge */}
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-4 py-1 flex items-center gap-2">
+          <span
+            className={`w-2 h-2 rounded-full ${
+              status === "live"
+                ? "bg-green-400 animate-pulse"
+                : status === "error"
+                ? "bg-red-400"
+                : "bg-yellow-400 animate-pulse"
+            }`}
+          />
+          <span className="text-xs uppercase tracking-widest">
+            {status === "live" ? "Inference Live" : status === "error" ? "Inference Error" : "Connecting…"}
+          </span>
+        </div>
+
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-6 py-2 flex gap-6">
           <span>
             TEMP <span className="text-cyan-300">{telemetry.temp}</span>
@@ -62,6 +94,14 @@ export default function MissionControl() {
           <span>
             HEADING <span className="text-cyan-300">{telemetry.heading}</span>
           </span>
+          {coralBleachingRatio !== null && (
+            <span>
+              CORAL{" "}
+              <span className={alert ? "text-red-400" : "text-cyan-300"}>
+                {(coralBleachingRatio * 100).toFixed(0)}% bleached
+              </span>
+            </span>
+          )}
         </div>
 
         {/* Targeting reticle */}
