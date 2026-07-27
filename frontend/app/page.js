@@ -41,9 +41,14 @@ export default function MissionControl() {
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState(null);
   const [webcamError, setWebcamError] = useState(null);
   const [videoUrlInput, setVideoUrlInput] = useState("");
+  // Separate from webcamError: true whenever the *currently active* video
+  // element failed to load, regardless of source mode. Drives the HUD
+  // status badge so a broken/missing clip shows "Feed Error" instead of
+  // sitting on "Connecting..." forever with no explanation.
+  const [videoLoadError, setVideoLoadError] = useState(false);
 
   const { boxes, coralBleachingRatio, status } = useFrameDetection(videoRef, {
-    enabled: viewMode === "video",
+    enabled: viewMode === "video" && !videoLoadError,
   });
 
   const alert =
@@ -71,6 +76,8 @@ export default function MissionControl() {
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+
+    setVideoLoadError(false);
 
     if (videoSourceMode === "webcam" && webcamStreamRef.current) {
       video.srcObject = webcamStreamRef.current;
@@ -203,12 +210,26 @@ export default function MissionControl() {
         loop={videoSourceMode !== "webcam"}
         playsInline
         onError={() => {
+          // Fires for ANY source mode now — previously this only reported
+          // errors when videoSourceMode === "url", so a missing/broken
+          // default clip (frontend/public/rov-feed.mp4) or a broken
+          // uploaded file failed completely silently, leaving the HUD
+          // stuck showing "Connecting..." forever with no explanation.
+          setVideoLoadError(true);
           if (videoSourceMode === "url") {
             setWebcamError(
               "Couldn't load that video — check the URL is a direct video file link and reachable"
             );
+          } else if (videoSourceMode === "default") {
+            console.error(
+              `Default clip failed to load from "${DEFAULT_VIDEO_SRC}". ` +
+              `Confirm the file exists at frontend/public/rov-feed.mp4 and was committed to the repo.`
+            );
+          } else if (videoSourceMode === "upload") {
+            console.error("Uploaded video failed to load.");
           }
         }}
+        onLoadedData={() => setVideoLoadError(false)}
         style={{ opacity: isMapMode ? 0 : 1 }}
       />
 
@@ -280,7 +301,9 @@ export default function MissionControl() {
           <div className="absolute top-16 left-1/2 -translate-x-1/2 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-4 py-1 flex items-center gap-2">
             <span
               className={`w-2 h-2 rounded-full ${
-                status === "live"
+                videoLoadError
+                  ? "bg-red-400"
+                  : status === "live"
                   ? "bg-green-400 animate-pulse"
                   : status === "error"
                   ? "bg-red-400"
@@ -288,7 +311,13 @@ export default function MissionControl() {
               }`}
             />
             <span className="text-xs uppercase tracking-widest">
-              {status === "live" ? "Inference Live" : status === "error" ? "Inference Error" : "Connecting…"}
+              {videoLoadError
+                ? "Feed Error — Check Video Source"
+                : status === "live"
+                ? "Inference Live"
+                : status === "error"
+                ? "Inference Error"
+                : "Connecting…"}
             </span>
           </div>
         )}
@@ -368,9 +397,12 @@ export default function MissionControl() {
                 Load URL
               </button>
             </form>
-            {webcamError && (
+            {(webcamError || (videoLoadError && videoSourceMode !== "url")) && (
               <span className="text-[10px] text-red-400 bg-black/40 rounded px-2 py-1">
-                {webcamError}
+                {webcamError ||
+                  (videoSourceMode === "default"
+                    ? "Default clip failed to load — check frontend/public/rov-feed.mp4 exists"
+                    : "Video failed to load")}
               </span>
             )}
           </div>
