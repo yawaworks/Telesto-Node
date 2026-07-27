@@ -1,9 +1,7 @@
 import random
-
-
 import time
 
-import requests
+import httpx
 
 # Mission location matches the bathymetry map's default center (Cairns,
 # Great Barrier Reef) so the "real" temperature reflects an actual place.
@@ -27,31 +25,33 @@ class TelemetrySimulator:
         self.lat = MISSION_LAT
         self.lng = MISSION_LNG
         self._last_temp_fetch = 0.0
+        self._ever_succeeded = False
 
     def _drift(self, value, step, low, high):
         value += random.uniform(-step, step)
         return max(low, min(high, value))
 
-    def _refresh_real_temperature(self):
+    async def _refresh_real_temperature(self):
         now = time.monotonic()
         if now - self._last_temp_fetch < _REAL_TEMP_CACHE_SECONDS:
             return  # still within the cache window, skip the API call
 
         try:
-            response = requests.get(
-                "https://marine-api.open-meteo.com/v1/marine",
-                params={
-                    "latitude": MISSION_LAT,
-                    "longitude": MISSION_LNG,
-                    "current": "sea_surface_temperature",
-                },
-                timeout=5,
-            )
-            response.raise_for_status()
-            data = response.json()
-            real_temp = data.get("current", {}).get("sea_surface_temperature")
-            if real_temp is not None:
-                self.temp = float(real_temp)
+            async with httpx.AsyncClient(timeout=5) as client:
+                response = await client.get(
+                    "https://marine-api.open-meteo.com/v1/marine",
+                    params={
+                        "latitude": MISSION_LAT,
+                        "longitude": MISSION_LNG,
+                        "current": "sea_surface_temperature",
+                    },
+                )
+                response.raise_for_status()
+                data = response.json()
+                real_temp = data.get("current", {}).get("sea_surface_temperature")
+                if real_temp is not None:
+                    self.temp = float(real_temp)
+                    self._ever_succeeded = True
         except Exception as exc:
             # Network hiccup or API down — keep drifting the last known
             # value instead of breaking the whole telemetry stream.
@@ -59,8 +59,8 @@ class TelemetrySimulator:
         finally:
             self._last_temp_fetch = now
 
-    def tick(self):
-        self._refresh_real_temperature()
+    async def tick(self):
+        await self._refresh_real_temperature()
 
         self.depth = self._drift(self.depth, 0.15, 35.0, 55.0)
         # Small jitter on top of the real fetched value so it doesn't look
@@ -78,5 +78,12 @@ class TelemetrySimulator:
             "heading": round(self.heading),
             "lat": round(self.lat, 4),
             "lng": round(self.lng, 4),
-            "temp_source": "live" if self._last_temp_fetch > 0 else "simulated",
+            # Reflects the outcome of the most recent fetch attempt, not
+            # just "has it ever worked once" — so a currently-failing API
+            # correctly shows as "simulated" again instead of getting
+            # stuck on "live" forever.
+            "temp_source": "live" if (
+                self._ever_succeeded
+                and (time.monotonic() - self._last_temp_fetch) < _REAL_TEMP_CACHE_SECONDS
+            ) else "simulated",
         }

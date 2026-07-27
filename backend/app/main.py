@@ -264,7 +264,7 @@ async def telemetry_socket(websocket: WebSocket):
     simulator = TelemetrySimulator()
     try:
         while True:
-            await websocket.send_json(simulator.tick())
+            await websocket.send_json(await simulator.tick())
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         pass
