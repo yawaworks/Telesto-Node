@@ -16,9 +16,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+import asyncio
+
 from app.inference import clahe_correct, coral_bleaching_ratio, predict_with_roboflow
 from app.obis_client import fetch_obis_species_data
 from app.report import generate_mission_report, log_detections
+from app.telemetry import TelemetrySimulator
 
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 
@@ -179,10 +182,16 @@ async def species_data(scientific_name: str, max_records: int = 200):
 
 @app.websocket("/ws/telemetry")
 async def telemetry_socket(websocket: WebSocket):
+    """Streams simulated but realistic ROV telemetry (depth, temp, salinity,
+    heading, coordinates) once per second, so the HUD reflects live-feeling
+    sensor drift instead of frozen numbers. Swap TelemetrySimulator for a
+    real sensor/ROV data source when one is available — the message shape
+    stays the same either way."""
     await websocket.accept()
+    simulator = TelemetrySimulator()
     try:
         while True:
-            data = await websocket.receive_json()
-            await websocket.send_json({"received": data})
+            await websocket.send_json(simulator.tick())
+            await asyncio.sleep(1)
     except WebSocketDisconnect:
         pass

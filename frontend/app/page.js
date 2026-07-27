@@ -5,6 +5,7 @@ import { initGamepadNavigation } from "../lib/gamepad-controller";
 import { initBathymetryMap } from "../lib/bathymetry-map";
 import { loadSpeciesMarkers } from "../lib/species-markers";
 import { useFrameDetection } from "../lib/useFrameDetection";
+import { useTelemetry } from "../lib/useTelemetry";
 import DetectionOverlay from "../components/DetectionOverlay";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
@@ -15,13 +16,7 @@ export default function MissionControl() {
   const videoRef = useRef(null);
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
-  const [telemetry, setTelemetry] = useState({
-    depth: "42.6 m",
-    coords: "11.3500 N, 144.2400 E",
-    temp: "17.2°C",
-    salinity: "34.9 PSU",
-    heading: "086°",
-  });
+  const { telemetry } = useTelemetry();
   const [speciesQuery, setSpeciesQuery] = useState(DEFAULT_SPECIES);
   const [viewMode, setViewMode] = useState("video");
   const [exportingReport, setExportingReport] = useState(false);
@@ -198,6 +193,9 @@ export default function MissionControl() {
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-6 py-2 flex gap-6">
           <span>
             TEMP <span className="text-cyan-300">{telemetry.temp}</span>
+            {telemetry.tempSource === "live" && (
+              <span className="ml-1 text-[10px] text-green-400 align-super">LIVE</span>
+            )}
           </span>
           <span>
             SALINITY <span className="text-cyan-300">{telemetry.salinity}</span>
