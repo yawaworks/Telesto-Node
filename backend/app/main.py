@@ -73,9 +73,21 @@ def _clean(value):
     return value
 
 
+@app.on_event("startup")
+async def warm_up_db():
+    """Kick off the first Mongo connection attempt in the background at
+    startup instead of on the first incoming request. This means Render's
+    health check never has to wait on a live TLS handshake/timeout — it
+    just reads whatever is_connected() reports at that moment."""
+    get_db()
+
+
 @app.get("/health")
 def health():
-    get_db()  # attempt connection so status reflects reality, not just the initial import
+    # No get_db() call here on purpose — this must return instantly so
+    # Render's health check never blocks on a Mongo TLS timeout. Connection
+    # status is populated by warm_up_db() at startup and refreshed lazily
+    # elsewhere (e.g. next time a route that actually needs the DB runs).
     return {"status": "ok", "mongodb_connected": is_connected()}
 
 
