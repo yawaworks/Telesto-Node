@@ -1,5 +1,6 @@
 import Script from "next/script";
 import "./globals.css";
+import Providers from "./providers";
 
 export const metadata = {
   title: "Telesto Node — Mission Control",
@@ -20,7 +21,7 @@ export default function RootLayout({ children }) {
           src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
           strategy="beforeInteractive"
         />
-        {children}
+        <Providers>{children}</Providers>
       </body>
     </html>
   );

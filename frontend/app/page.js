@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useSession, signOut } from "next-auth/react";
+import { useRouter } from "next/navigation";
 import { initGamepadNavigation } from "../lib/gamepad-controller";
 import { initBathymetryMap } from "../lib/bathymetry-map";
 import { loadSpeciesMarkers } from "../lib/species-markers";
@@ -14,6 +16,15 @@ const DEFAULT_SPECIES = "Acropora cervicornis";
 const DEFAULT_VIDEO_SRC = "/rov-feed.mp4";
 
 export default function MissionControl() {
+  const { data: session, status: sessionStatus } = useSession();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (sessionStatus === "unauthenticated") {
+      router.push("/login");
+    }
+  }, [sessionStatus, router]);
+
   const videoRef = useRef(null);
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
@@ -168,6 +179,19 @@ export default function MissionControl() {
 
   const isMapMode = viewMode === "map";
 
+  // All hooks above run unconditionally every render (required by the Rules
+  // of Hooks) — only the actual JSX output is gated on auth status here.
+  if (sessionStatus === "loading") {
+    return (
+      <div className="min-h-screen bg-black text-cyan-200 flex items-center justify-center font-mono text-sm">
+        Checking mission clearance…
+      </div>
+    );
+  }
+  if (sessionStatus === "unauthenticated") {
+    return null; // redirect to /login is already in flight via the effect above
+  }
+
   return (
     <div className="relative w-full h-screen overflow-hidden bg-black text-cyan-200">
       <video
@@ -217,6 +241,16 @@ export default function MissionControl() {
         <div className="absolute top-4 right-4 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-4 py-2 text-right">
           <p className="text-xs uppercase tracking-widest text-cyan-400">Coordinates</p>
           <p className="text-sm">{telemetry.coords}</p>
+        </div>
+
+        <div className="absolute top-4 right-4 translate-y-16 pointer-events-auto backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-3 py-1 flex items-center gap-2 text-[10px]">
+          <span className="text-cyan-400/70">{session?.user?.email || session?.user?.name}</span>
+          <button
+            onClick={() => signOut({ callbackUrl: "/login" })}
+            className="uppercase tracking-widest text-red-400 hover:text-red-300"
+          >
+            Sign Out
+          </button>
         </div>
 
         <div className="absolute top-4 left-1/2 -translate-x-1/2 pointer-events-auto flex gap-2">
