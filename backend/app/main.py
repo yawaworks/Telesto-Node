@@ -11,10 +11,11 @@ import os
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
+import requests
 
 import asyncio
 
@@ -147,6 +148,64 @@ async def export_report(
         headers={
             "Content-Disposition": 'attachment; filename="telesto-node-mission-report.pdf"'
         },
+    )
+
+
+ALLOWED_VIDEO_HOSTS_NOTE = (
+    "No allowlist is enforced here for hackathon simplicity — in production, "
+    "restrict this to a known set of trusted research video hosts to avoid "
+    "turning this into an open proxy."
+)
+
+
+@app.get("/proxy-video")
+async def proxy_video(url: str, request: Request):
+    """Fetches a remote video on the server's behalf and re-serves it with
+    permissive CORS headers, so footage from hosts that don't allow direct
+    cross-origin canvas capture (e.g. NOAA's archive) can still be played
+    and analyzed without the researcher needing to manually download and
+    re-upload the file first. Supports Range requests for proper seeking.
+    """
+    if not url.lower().startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="Only http(s) URLs are supported")
+
+    upstream_headers = {}
+    range_header = request.headers.get("range")
+    if range_header:
+        upstream_headers["Range"] = range_header
+
+    try:
+        upstream = requests.get(url, headers=upstream_headers, stream=True, timeout=15)
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to fetch source video: {exc}")
+
+    if upstream.status_code not in (200, 206):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Source video host returned status {upstream.status_code}",
+        )
+
+    response_headers = {
+        "Accept-Ranges": "bytes",
+        "Access-Control-Allow-Origin": "*",
+    }
+    for header in ("Content-Type", "Content-Length", "Content-Range"):
+        if header in upstream.headers:
+            response_headers[header] = upstream.headers[header]
+
+    def stream_body():
+        try:
+            for chunk in upstream.iter_content(chunk_size=64 * 1024):
+                if chunk:
+                    yield chunk
+        finally:
+            upstream.close()
+
+    return StreamingResponse(
+        stream_body(),
+        status_code=upstream.status_code,
+        headers=response_headers,
+        media_type=upstream.headers.get("Content-Type", "video/mp4"),
     )
 
 

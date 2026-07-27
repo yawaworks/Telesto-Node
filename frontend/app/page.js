@@ -11,15 +11,25 @@ import DetectionOverlay from "../components/DetectionOverlay";
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
 const BLEACHING_ALERT_THRESHOLD = 0.4;
 const DEFAULT_SPECIES = "Acropora cervicornis";
+const DEFAULT_VIDEO_SRC = "/rov-feed.mp4";
 
 export default function MissionControl() {
   const videoRef = useRef(null);
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const webcamStreamRef = useRef(null);
+
   const { telemetry } = useTelemetry();
   const [speciesQuery, setSpeciesQuery] = useState(DEFAULT_SPECIES);
   const [viewMode, setViewMode] = useState("video");
   const [exportingReport, setExportingReport] = useState(false);
+
+  // Video source: "default" (bundled clip) | "upload" (user file) | "webcam" (live camera)
+  const [videoSourceMode, setVideoSourceMode] = useState("default");
+  const [uploadedVideoUrl, setUploadedVideoUrl] = useState(null);
+  const [webcamError, setWebcamError] = useState(null);
+  const [videoUrlInput, setVideoUrlInput] = useState("");
 
   const { boxes, coralBleachingRatio, status } = useFrameDetection(videoRef, {
     enabled: viewMode === "video",
@@ -44,6 +54,87 @@ export default function MissionControl() {
       map?.remove?.();
     };
   }, []);
+
+  // Actually apply whichever video source is currently selected. Webcam
+  // needs the imperative srcObject API; file/default just use a normal src.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (videoSourceMode === "webcam" && webcamStreamRef.current) {
+      video.srcObject = webcamStreamRef.current;
+      video.muted = true;
+      video.play().catch(() => {});
+    } else if (videoSourceMode === "url" && videoUrlInput) {
+      video.srcObject = null;
+      video.crossOrigin = "anonymous";
+      // Route through our backend proxy so hosts that don't allow direct
+      // cross-origin canvas capture (most sites, including NOAA's archive)
+      // still work without the user needing to download-then-upload.
+      video.src = `${API_BASE_URL}/proxy-video?url=${encodeURIComponent(videoUrlInput)}`;
+      video.play().catch(() => {});
+    } else {
+      video.srcObject = null;
+      video.removeAttribute("crossorigin");
+      const nextSrc =
+        videoSourceMode === "upload" && uploadedVideoUrl ? uploadedVideoUrl : DEFAULT_VIDEO_SRC;
+      video.src = nextSrc;
+      video.play().catch(() => {});
+    }
+  }, [videoSourceMode, uploadedVideoUrl, videoUrlInput]);
+
+  // Clean up webcam tracks whenever we leave webcam mode or unmount
+  useEffect(() => {
+    return () => {
+      webcamStreamRef.current?.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
+
+  function handleUploadClick() {
+    fileInputRef.current?.click();
+  }
+
+  function handleFileSelected(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (uploadedVideoUrl) URL.revokeObjectURL(uploadedVideoUrl);
+    webcamStreamRef.current?.getTracks().forEach((track) => track.stop());
+    webcamStreamRef.current = null;
+
+    const url = URL.createObjectURL(file);
+    setUploadedVideoUrl(url);
+    setVideoSourceMode("upload");
+    setWebcamError(null);
+  }
+
+  async function handleUseWebcam() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      webcamStreamRef.current = stream;
+      setVideoSourceMode("webcam");
+      setWebcamError(null);
+    } catch (err) {
+      console.error("Webcam access denied or unavailable:", err);
+      setWebcamError("Camera access denied or unavailable");
+    }
+  }
+
+  function handleUseDefaultClip() {
+    webcamStreamRef.current?.getTracks().forEach((track) => track.stop());
+    webcamStreamRef.current = null;
+    setVideoSourceMode("default");
+    setWebcamError(null);
+  }
+
+  function handleUseVideoUrl(e) {
+    e.preventDefault();
+    if (!videoUrlInput.trim()) return;
+    webcamStreamRef.current?.getTracks().forEach((track) => track.stop());
+    webcamStreamRef.current = null;
+    setVideoSourceMode("url");
+    setWebcamError(null);
+  }
 
   function handleSpeciesSearch(e) {
     e.preventDefault();
@@ -83,12 +174,27 @@ export default function MissionControl() {
         ref={videoRef}
         id="feed"
         className="absolute inset-0 w-full h-full object-cover"
-        src="/rov-feed.mp4"
         autoPlay
         muted
-        loop
+        loop={videoSourceMode !== "webcam"}
         playsInline
+        onError={() => {
+          if (videoSourceMode === "url") {
+            setWebcamError(
+              "Couldn't load that video — check the URL is a direct video file link and reachable"
+            );
+          }
+        }}
         style={{ opacity: isMapMode ? 0 : 1 }}
+      />
+
+      {/* Hidden file input, triggered by the Upload Video button */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="video/*"
+        className="hidden"
+        onChange={handleFileSelected}
       />
 
       <DetectionOverlay videoRef={videoRef} boxes={isMapMode ? [] : boxes} />
@@ -174,7 +280,68 @@ export default function MissionControl() {
           </form>
         )}
 
-        {/* Export Field Report button */}
+        {/* Video source controls — only relevant in ROV Feed mode */}
+        {!isMapMode && (
+          <div className="absolute bottom-20 left-4 pointer-events-auto flex flex-col gap-2">
+            <div className="flex gap-2">
+              <button
+                onClick={handleUseDefaultClip}
+                className={`backdrop-blur-md border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest ${
+                  videoSourceMode === "default"
+                    ? "bg-cyan-400/20 border-cyan-400/60"
+                    : "bg-white/5 border-cyan-400/30 hover:bg-white/10"
+                }`}
+              >
+                Default Clip
+              </button>
+              <button
+                onClick={handleUploadClick}
+                className={`backdrop-blur-md border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest ${
+                  videoSourceMode === "upload"
+                    ? "bg-cyan-400/20 border-cyan-400/60"
+                    : "bg-white/5 border-cyan-400/30 hover:bg-white/10"
+                }`}
+              >
+                Upload Video
+              </button>
+              <button
+                onClick={handleUseWebcam}
+                className={`backdrop-blur-md border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest ${
+                  videoSourceMode === "webcam"
+                    ? "bg-cyan-400/20 border-cyan-400/60"
+                    : "bg-white/5 border-cyan-400/30 hover:bg-white/10"
+                }`}
+              >
+                Use Webcam
+              </button>
+            </div>
+            <form onSubmit={handleUseVideoUrl} className="flex gap-2">
+              <input
+                type="text"
+                value={videoUrlInput}
+                onChange={(e) => setVideoUrlInput(e.target.value)}
+                placeholder="Paste a direct .mp4 video URL…"
+                className="backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-lg px-2 py-1 text-[10px] text-cyan-200 placeholder:text-cyan-200/40 outline-none focus:border-cyan-400/70 w-56"
+              />
+              <button
+                type="submit"
+                className={`backdrop-blur-md border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest ${
+                  videoSourceMode === "url"
+                    ? "bg-cyan-400/20 border-cyan-400/60"
+                    : "bg-white/5 border-cyan-400/30 hover:bg-white/10"
+                }`}
+              >
+                Load URL
+              </button>
+            </form>
+            {webcamError && (
+              <span className="text-[10px] text-red-400 bg-black/40 rounded px-2 py-1">
+                {webcamError}
+              </span>
+            )}
+          </div>
+        )}
+
         <button
           onClick={handleExportReport}
           disabled={exportingReport}
