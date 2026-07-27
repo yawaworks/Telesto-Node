@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 import asyncio
 
+from app.db import get_db, is_connected
 from app.inference import clahe_correct, coral_bleaching_ratio, predict_with_roboflow
 from app.obis_client import fetch_obis_species_data
 from app.report import generate_mission_report, log_detections
@@ -73,7 +74,8 @@ def _clean(value):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    get_db()  # attempt connection so status reflects reality, not just the initial import
+    return {"status": "ok", "mongodb_connected": is_connected()}
 
 
 @app.post("/analyze-frame", response_model=FrameAnalysisResponse)

@@ -15,18 +15,26 @@ from reportlab.platypus import (
     HRFlowable,
 )
 
-# In-memory session log of every detection seen this run. Cleared on
-# backend restart — fine for a hackathon demo, would move to a real DB
-# (MongoDB Atlas per the plan) for a production deployment.
+from app.db import get_db
+
+# In-memory fallback used only if MongoDB isn't configured/reachable.
+# Cleared on backend restart — MongoDB is what makes this survive restarts.
 detection_log = []
+
+
+def _mongo_collection():
+    db = get_db()
+    return db["detections"] if db is not None else None
 
 
 def log_detections(boxes, coral_bleaching_ratio):
     """Called from /analyze-frame after each successful inference so the
-    export report can summarize the whole session."""
+    export report can summarize the whole session. Writes to MongoDB when
+    available; falls back to an in-memory list otherwise."""
     timestamp = datetime.now(timezone.utc)
+    entries = []
     for box in boxes:
-        detection_log.append(
+        entries.append(
             {
                 "timestamp": timestamp,
                 "label": box["label"],
@@ -35,7 +43,7 @@ def log_detections(boxes, coral_bleaching_ratio):
             }
         )
     if coral_bleaching_ratio is not None:
-        detection_log.append(
+        entries.append(
             {
                 "timestamp": timestamp,
                 "label": "__coral_bleaching_reading__",
@@ -43,6 +51,32 @@ def log_detections(boxes, coral_bleaching_ratio):
                 "source": "coral_bleach",
             }
         )
+
+    if not entries:
+        return
+
+    collection = _mongo_collection()
+    if collection is not None:
+        try:
+            collection.insert_many(entries)
+            return
+        except Exception as exc:
+            print(f"[report] MongoDB insert failed, falling back to memory: {exc}")
+
+    detection_log.extend(entries)
+
+
+def _fetch_all_entries():
+    """Reads every logged entry from MongoDB if connected, else the
+    in-memory fallback list."""
+    collection = _mongo_collection()
+    if collection is not None:
+        try:
+            return list(collection.find({}))
+        except Exception as exc:
+            print(f"[report] MongoDB read failed, falling back to memory: {exc}")
+
+    return detection_log
 
 
 def _health_index(avg_bleaching_ratio):
@@ -57,8 +91,9 @@ def generate_mission_report(telemetry: dict) -> bytes:
     """Builds a PDF summarizing species detected, counts, and ecosystem
     health index from the session's detection_log, plus the mission
     telemetry snapshot (depth, coordinates, etc.) passed in from the HUD."""
-    species_entries = [d for d in detection_log if d["source"] != "coral_bleach"]
-    bleach_entries = [d for d in detection_log if d["source"] == "coral_bleach"]
+    all_entries = _fetch_all_entries()
+    species_entries = [d for d in all_entries if d["source"] != "coral_bleach"]
+    bleach_entries = [d for d in all_entries if d["source"] == "coral_bleach"]
 
     species_counts = Counter(d["label"] for d in species_entries)
     avg_bleaching = (
