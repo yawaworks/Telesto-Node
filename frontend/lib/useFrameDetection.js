@@ -20,7 +20,17 @@ function distance(a, b) {
   return Math.hypot(a[0] - b[0], a[1] - b[1]);
 }
 
-export function useFrameDetection(videoRef, { enabled = true } = {}) {
+/**
+ * @param {object} [options]
+ * @param {boolean} [options.enabled]
+ * @param {{lat?: number, lng?: number}} [options.telemetry] - current
+ *   mission telemetry (e.g. from useTelemetry()). Read via a ref so fast
+ *   telemetry updates don't tear down and rebuild the capture interval —
+ *   only the latest value at capture time is sent along with the frame,
+ *   as query params, so the backend can attach real coordinates to any
+ *   n8n detection alert it fires.
+ */
+export function useFrameDetection(videoRef, { enabled = true, telemetry } = {}) {
   const [boxes, setBoxes] = useState([]);
   const [classifications, setClassifications] = useState([]);
   const [coralBleachingRatio, setCoralBleachingRatio] = useState(null);
@@ -31,6 +41,11 @@ export function useFrameDetection(videoRef, { enabled = true } = {}) {
   const historyRef = useRef([]);
   const lastGoodBoxesRef = useRef([]);
   const missedFramesRef = useRef(0);
+
+  const telemetryRef = useRef(telemetry);
+  useEffect(() => {
+    telemetryRef.current = telemetry;
+  }, [telemetry]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -84,8 +99,18 @@ export function useFrameDetection(videoRef, { enabled = true } = {}) {
 
         setStatus((prev) => (prev === "live" ? "live" : "connecting"));
 
+        // latitude/longitude are query params on the backend (same as
+        // conf_threshold), not form fields — FastAPI reads plain scalar
+        // params as query params when the request body is multipart.
+        const params = new URLSearchParams({ conf_threshold: String(CONF_THRESHOLD) });
+        const currentTelemetry = telemetryRef.current;
+        if (currentTelemetry?.lat != null && currentTelemetry?.lng != null) {
+          params.set("latitude", String(currentTelemetry.lat));
+          params.set("longitude", String(currentTelemetry.lng));
+        }
+
         const response = await fetch(
-          `${API_BASE_URL}/analyze-frame?conf_threshold=${CONF_THRESHOLD}`,
+          `${API_BASE_URL}/analyze-frame?${params.toString()}`,
           { method: "POST", body: formData }
         );
 

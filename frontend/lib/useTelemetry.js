@@ -17,11 +17,17 @@ function formatCoords(lat, lng) {
 /**
  * Connects to the backend's /ws/telemetry stream and returns live-updating
  * mission telemetry, reconnecting automatically if the connection drops.
+ *
+ * Exposes raw `lat`/`lng` alongside the formatted `coords` string so
+ * callers (e.g. useFrameDetection, for n8n detection alerts) can attach
+ * real coordinates without re-parsing the display string.
  */
 export function useTelemetry() {
   const [telemetry, setTelemetry] = useState({
     depth: "42.6 m",
     coords: "11.3500 N, 144.2400 E",
+    lat: 11.35,
+    lng: 144.24,
     temp: "17.2°C",
     salinity: "34.9 PSU",
     heading: "086°",
@@ -47,6 +53,8 @@ export function useTelemetry() {
           setTelemetry({
             depth: `${data.depth.toFixed(1)} m`,
             coords: formatCoords(data.lat, data.lng),
+            lat: data.lat,
+            lng: data.lng,
             temp: `${data.temp.toFixed(1)}°C`,
             salinity: `${data.salinity.toFixed(1)} PSU`,
             heading: `${String(Math.round(data.heading)).padStart(3, "0")}°`,

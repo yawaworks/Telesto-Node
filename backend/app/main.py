@@ -3,8 +3,9 @@ from typing import List, Optional
 
 from dotenv import load_dotenv
 
-# Must run BEFORE importing app.inference, since that module reads
-# ROBOFLOW_API_KEY (and model IDs) from the environment at import time.
+# Must run BEFORE importing app.inference or app.alerts, since both read
+# env vars (ROBOFLOW_API_KEY, N8N_DETECTION_WEBHOOK_URL) from the
+# environment at import time.
 load_dotenv()
 
 import os
@@ -26,12 +27,13 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
+from app.alerts import send_detection_alert
 from app.cloudinary_client import delete_clip, upload_clip, upload_snapshot
 from app.db import get_db, is_connected
 from app.inference import clahe_correct, coral_bleaching_ratio, predict_with_roboflow
 from app.obis_client import fetch_obis_species_data
 from app.report import generate_mission_report, log_detections
-from app.telemetry import TelemetrySimulator
+from app.telemetry import TelemetrySimulator, MISSION_LAT, MISSION_LNG
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -107,11 +109,24 @@ def health():
 
 @app.post("/analyze-frame", response_model=FrameAnalysisResponse)
 @limiter.limit("60/minute")
-async def analyze_frame(request: Request, file: UploadFile = File(...), conf_threshold: float = 0.2):
+async def analyze_frame(
+    request: Request,
+    file: UploadFile = File(...),
+    conf_threshold: float = 0.2,
+    latitude: float = MISSION_LAT,
+    longitude: float = MISSION_LNG,
+):
     """Runs every enabled Roboflow model against this frame (marine-fishes
     species detection + the coral bleach classifier by default), merging
     results into one response, and logs the detections for the mission
-    report export."""
+    report export.
+
+    latitude/longitude are optional and come from the frontend's live
+    telemetry (useTelemetry) so detection alerts carry a real position.
+    They default to the mission's home coordinates (Great Barrier Reef)
+    if the frontend hasn't sent them yet — same fallback used everywhere
+    else telemetry is referenced in this app.
+    """
     raw_bytes = await file.read()
     np_arr = np.frombuffer(raw_bytes, np.uint8)
     frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -145,6 +160,20 @@ async def analyze_frame(request: Request, file: UploadFile = File(...), conf_thr
             frame_ratio = None
 
     log_detections(result["boxes"], frame_ratio)
+
+    # Fire detection alerts to n8n without blocking the response the
+    # frontend is waiting on. send_detection_alert internally filters by
+    # confidence threshold and applies a per-species cooldown, so this is
+    # safe to call for every box on every frame.
+    for box in boxes:
+        asyncio.create_task(
+            send_detection_alert(
+                species=box.label,
+                confidence=box.confidence,
+                latitude=latitude,
+                longitude=longitude,
+            )
+        )
 
     return FrameAnalysisResponse(
         boxes=boxes, classifications=classifications, coral_bleaching_ratio=frame_ratio

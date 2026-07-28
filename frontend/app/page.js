@@ -81,8 +81,8 @@ export default function MissionControl() {
 
   const { boxes, coralBleachingRatio, status } = useFrameDetection(videoRef, {
     enabled: viewMode === "video" && !videoLoadError,
+    telemetry,
   });
-
   const alert =
     coralBleachingRatio !== null && coralBleachingRatio >= BLEACHING_ALERT_THRESHOLD;
 
