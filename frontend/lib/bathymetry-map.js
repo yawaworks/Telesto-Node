@@ -20,10 +20,27 @@ export function initBathymetryMap(container) {
     container,
     style: "https://tiles.openfreemap.org/styles/liberty",
     center: [145.7781, -16.9203], // Cairns, Australia — coastline + Great Barrier Reef in view
-    zoom: 9.5,
-    pitch: 70,
+    // Lower starting zoom/pitch than before (was 9.5/70) — a steep 3D tilt
+    // at high zoom requests a large burst of tiles simultaneously on load,
+    // which can trip rate-limiting on OpenFreeMap's free shared
+    // infrastructure and surface as CORS-looking errors (really Cloudflare
+    // 522s from the origin failing to respond in time). Starting gentler
+    // and letting the user zoom/tilt in manually spreads the tile requests
+    // out over time instead of firing them all at once.
+    zoom: 8,
+    pitch: 45,
     bearing: 45,
     antialias: true,
+  });
+
+  map.on("error", (e) => {
+    // OpenFreeMap is a free, best-effort service — tile/font fetches can
+    // fail under load or during outages. Log clearly instead of letting
+    // it show up as unexplained CORS spam in the console.
+    console.warn(
+      "[bathymetry-map] tile/style load error (likely transient OpenFreeMap availability):",
+      e?.error || e
+    );
   });
 
   map.on("load", () => {
