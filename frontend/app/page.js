@@ -13,7 +13,12 @@ import DetectionOverlay from "../components/DetectionOverlay";
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
 const BLEACHING_ALERT_THRESHOLD = 0.4;
 const DEFAULT_SPECIES = "Acropora cervicornis";
-const DEFAULT_VIDEO_SRC = "/rov-feed.mp4";
+// Hosted on Cloudinary instead of committed to the repo — a demo-length
+// video file is too large to check into GitHub sensibly, and this way it
+// can be swapped without a redeploy. Replace with your own upload's URL.
+const DEFAULT_VIDEO_SRC =
+  process.env.NEXT_PUBLIC_DEFAULT_VIDEO_URL ||
+  "https://res.cloudinary.com/YOUR_CLOUD_NAME/video/upload/rov-feed.mp4";
 
 export default function MissionControl() {
   const { data: session, status: sessionStatus } = useSession();
@@ -32,9 +37,25 @@ export default function MissionControl() {
   const webcamStreamRef = useRef(null);
 
   const { telemetry } = useTelemetry();
+  // Gamepad navigation is initialized once (empty-deps effect below), so its
+  // onSnapshot callback would otherwise close over whatever `telemetry` was
+  // on that first render and never see updates. A ref sidesteps that without
+  // re-running gamepad setup on every telemetry tick.
+  const telemetryRef = useRef(telemetry);
+  useEffect(() => {
+    telemetryRef.current = telemetry;
+  }, [telemetry]);
+
   const [speciesQuery, setSpeciesQuery] = useState(DEFAULT_SPECIES);
   const [viewMode, setViewMode] = useState("video");
   const [exportingReport, setExportingReport] = useState(false);
+  const [snapshotMessage, setSnapshotMessage] = useState(null);
+  // Populated further down (handleDiscoverySnapshot is defined after the
+  // video-source handlers). Declared here, before the gamepad-init effect
+  // that wires it up, purely for readability — functionally it's safe
+  // either way since the effect only dereferences .current() on an actual
+  // button press, long after the full component has rendered.
+  const handleDiscoverySnapshotRef = useRef(() => {});
 
   // Video source: "default" (bundled clip) | "upload" (user file) | "webcam" (live camera)
   const [videoSourceMode, setVideoSourceMode] = useState("default");
@@ -47,6 +68,17 @@ export default function MissionControl() {
   // sitting on "Connecting..." forever with no explanation.
   const [videoLoadError, setVideoLoadError] = useState(false);
 
+  // Clip library (Save to Library / My Clips / Team Clips)
+  const [uploadedFile, setUploadedFile] = useState(null); // raw File, kept so we can actually upload it on Save
+  const [savingClip, setSavingClip] = useState(false);
+  const [shareClip, setShareClip] = useState(false);
+  const [clipSaveMessage, setClipSaveMessage] = useState(null);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [libraryScope, setLibraryScope] = useState("mine"); // "mine" | "shared"
+  const [myClips, setMyClips] = useState([]);
+  const [sharedClips, setSharedClips] = useState([]);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+
   const { boxes, coralBleachingRatio, status } = useFrameDetection(videoRef, {
     enabled: viewMode === "video" && !videoLoadError,
   });
@@ -57,7 +89,11 @@ export default function MissionControl() {
   useEffect(() => {
     const map = initBathymetryMap(mapContainerRef.current);
     mapRef.current = map;
-    const cleanupGamepad = initGamepadNavigation({ videoElement: videoRef.current, map });
+    const cleanupGamepad = initGamepadNavigation({
+      videoElement: videoRef.current,
+      map,
+      onSnapshot: () => handleDiscoverySnapshotRef.current(),
+    });
 
     if (map) {
       map.on("load", () => {
@@ -93,9 +129,17 @@ export default function MissionControl() {
       video.play().catch(() => {});
     } else {
       video.srcObject = null;
-      video.removeAttribute("crossorigin");
       const nextSrc =
         videoSourceMode === "upload" && uploadedVideoUrl ? uploadedVideoUrl : DEFAULT_VIDEO_SRC;
+      // External URLs (the Cloudinary-hosted default clip) need crossOrigin
+      // set so canvas.toBlob() in useFrameDetection doesn't throw a
+      // tainted-canvas security error. Local blob: URLs (uploaded files)
+      // are same-origin and don't need it, but setting it is harmless.
+      if (nextSrc.startsWith("http")) {
+        video.crossOrigin = "anonymous";
+      } else {
+        video.removeAttribute("crossorigin");
+      }
       video.src = nextSrc;
       video.play().catch(() => {});
     }
@@ -122,8 +166,10 @@ export default function MissionControl() {
 
     const url = URL.createObjectURL(file);
     setUploadedVideoUrl(url);
+    setUploadedFile(file);
     setVideoSourceMode("upload");
     setWebcamError(null);
+    setClipSaveMessage(null);
   }
 
   async function handleUseWebcam() {
@@ -153,6 +199,158 @@ export default function MissionControl() {
     setVideoSourceMode("url");
     setWebcamError(null);
   }
+
+  async function handleSaveToLibrary() {
+    if (!uploadedFile) return;
+    setSavingClip(true);
+    setClipSaveMessage(null);
+    try {
+      const formData = new FormData();
+      formData.append("file", uploadedFile);
+
+      const params = new URLSearchParams({
+        name: uploadedFile.name || "Untitled clip",
+        owner_email: session?.user?.email || "",
+        shared: shareClip ? "true" : "false",
+      });
+
+      const response = await fetch(`${API_BASE_URL}/clips?${params}`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!response.ok) throw new Error(`Save failed: ${response.status}`);
+
+      setClipSaveMessage({ type: "success", text: shareClip ? "Saved to Team Clips" : "Saved to My Clips" });
+      // Once saved, this exact file object is no longer needed for another
+      // save — but keep it playable, just prevent double-saving by accident.
+      setUploadedFile(null);
+    } catch (err) {
+      console.error("Save to library failed:", err);
+      setClipSaveMessage({ type: "error", text: "Couldn't save — check connection and try again" });
+    } finally {
+      setSavingClip(false);
+      setTimeout(() => setClipSaveMessage(null), 4000);
+    }
+  }
+
+  async function fetchClips(scope) {
+    setLibraryLoading(true);
+    try {
+      const params = new URLSearchParams({ scope });
+      if (scope === "mine") params.set("owner_email", session?.user?.email || "");
+
+      const response = await fetch(`${API_BASE_URL}/clips?${params}`);
+      if (!response.ok) throw new Error(`Failed to load clips: ${response.status}`);
+      const data = await response.json();
+
+      if (scope === "shared") setSharedClips(data);
+      else setMyClips(data);
+    } catch (err) {
+      console.error("Failed to load clip library:", err);
+    } finally {
+      setLibraryLoading(false);
+    }
+  }
+
+  function handleOpenLibrary() {
+    setLibraryOpen(true);
+    fetchClips(libraryScope);
+  }
+
+  function handleSwitchLibraryScope(scope) {
+    setLibraryScope(scope);
+    const alreadyLoaded = scope === "mine" ? myClips.length > 0 : sharedClips.length > 0;
+    if (!alreadyLoaded) fetchClips(scope);
+  }
+
+  async function handleDeleteClip(clip, e) {
+    e.stopPropagation(); // don't trigger handleLoadClipFromLibrary on the same click
+    if (!window.confirm(`Delete "${clip.name}"? This can't be undone.`)) return;
+
+    try {
+      const params = new URLSearchParams({ owner_email: session?.user?.email || "" });
+      const response = await fetch(`${API_BASE_URL}/clips/${clip.id}?${params}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) throw new Error(`Delete failed: ${response.status}`);
+
+      // Remove it from whichever list(s) currently hold it locally, rather
+      // than re-fetching — a shared clip you own could be sitting in both
+      // "mine" and "shared" caches at once.
+      setMyClips((prev) => prev.filter((c) => c.id !== clip.id));
+      setSharedClips((prev) => prev.filter((c) => c.id !== clip.id));
+    } catch (err) {
+      console.error("Delete clip failed:", err);
+      alert("Couldn't delete that clip — check your connection and try again.");
+    }
+  }
+
+  function handleLoadClipFromLibrary(clip) {
+    webcamStreamRef.current?.getTracks().forEach((track) => track.stop());
+    webcamStreamRef.current = null;
+    setUploadedFile(null);
+    if (uploadedVideoUrl) URL.revokeObjectURL(uploadedVideoUrl);
+    setUploadedVideoUrl(null);
+    setVideoUrlInput(clip.url);
+    setVideoSourceMode("url");
+    setWebcamError(null);
+    setLibraryOpen(false);
+  }
+
+  async function handleDiscoverySnapshot() {
+    const video = videoRef.current;
+    if (!video || video.readyState < 2) return;
+
+    try {
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const blob = await new Promise((resolve) =>
+        canvas.toBlob(resolve, "image/jpeg", 0.92)
+      );
+      if (!blob) throw new Error("Failed to capture frame");
+
+      const formData = new FormData();
+      formData.append("file", blob, `discovery-${Date.now()}.jpg`);
+
+      const t = telemetryRef.current;
+      const params = new URLSearchParams({
+        depth: t.depth || "",
+        coords: t.coords || "",
+        temp: t.temp || "",
+        salinity: t.salinity || "",
+        heading: t.heading || "",
+        species_query: speciesQuery || "",
+      });
+
+      setSnapshotMessage({ type: "pending", text: "Saving snapshot…" });
+
+      const response = await fetch(`${API_BASE_URL}/snapshot?${params}`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!response.ok) throw new Error(`Snapshot upload failed: ${response.status}`);
+
+      const data = await response.json();
+      setSnapshotMessage({
+        type: "success",
+        text: data.saved_to_db ? "Snapshot saved" : "Snapshot saved (offline log unavailable)",
+      });
+    } catch (err) {
+      console.error("Discovery Snapshot failed:", err);
+      setSnapshotMessage({ type: "error", text: "Snapshot failed — check connection" });
+    } finally {
+      // Auto-dismiss the toast after a few seconds either way
+      setTimeout(() => setSnapshotMessage(null), 3500);
+    }
+  }
+
+  useEffect(() => {
+    handleDiscoverySnapshotRef.current = handleDiscoverySnapshot;
+  });
 
   function handleSpeciesSearch(e) {
     e.preventDefault();
@@ -377,7 +575,44 @@ export default function MissionControl() {
               >
                 Use Webcam
               </button>
+              <button
+                onClick={handleOpenLibrary}
+                className="backdrop-blur-md border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest bg-white/5 border-cyan-400/30 hover:bg-white/10"
+              >
+                📁 Clip Library
+              </button>
             </div>
+
+            {videoSourceMode === "upload" && uploadedFile && (
+              <div className="flex items-center gap-2 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-lg px-2 py-1">
+                <label className="flex items-center gap-1 text-[10px] text-cyan-200/80 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={shareClip}
+                    onChange={(e) => setShareClip(e.target.checked)}
+                    className="accent-cyan-400"
+                  />
+                  Share with team
+                </label>
+                <button
+                  onClick={handleSaveToLibrary}
+                  disabled={savingClip}
+                  className="text-[10px] uppercase tracking-widest text-cyan-300 hover:text-cyan-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {savingClip ? "Saving…" : "Save to Library"}
+                </button>
+              </div>
+            )}
+
+            {clipSaveMessage && (
+              <span
+                className={`text-[10px] rounded px-2 py-1 bg-black/40 ${
+                  clipSaveMessage.type === "success" ? "text-green-400" : "text-red-400"
+                }`}
+              >
+                {clipSaveMessage.text}
+              </span>
+            )}
             <form onSubmit={handleUseVideoUrl} className="flex gap-2">
               <input
                 type="text"
@@ -407,6 +642,13 @@ export default function MissionControl() {
             )}
           </div>
         )}
+
+        <button
+          onClick={handleDiscoverySnapshot}
+          className="absolute top-4 right-4 translate-y-32 pointer-events-auto backdrop-blur-md bg-cyan-400/10 border border-cyan-400/40 rounded-xl px-4 py-2 text-xs uppercase tracking-widest hover:bg-cyan-400/20"
+        >
+          📸 Snapshot
+        </button>
 
         <button
           onClick={handleExportReport}
@@ -453,6 +695,98 @@ export default function MissionControl() {
         {!isMapMode && alert && (
           <div className="absolute bottom-4 right-4 backdrop-blur-md bg-red-500/10 border border-red-400/50 text-red-300 rounded-xl px-4 py-2 animate-pulse">
             ⚠ Coral Bleaching Detected
+          </div>
+        )}
+
+        {snapshotMessage && (
+          <div
+            className={`absolute top-1/2 left-1/2 -translate-x-1/2 translate-y-24 backdrop-blur-md border rounded-xl px-4 py-2 text-xs uppercase tracking-widest ${
+              snapshotMessage.type === "success"
+                ? "bg-green-400/10 border-green-400/50 text-green-300"
+                : snapshotMessage.type === "error"
+                ? "bg-red-500/10 border-red-400/50 text-red-300"
+                : "bg-white/5 border-cyan-400/30 text-cyan-200"
+            }`}
+          >
+            {snapshotMessage.text}
+          </div>
+        )}
+
+        {libraryOpen && (
+          <div className="absolute inset-0 bg-black/70 pointer-events-auto flex items-center justify-center">
+            <div className="w-full max-w-md max-h-[70vh] flex flex-col backdrop-blur-md bg-black/80 border border-cyan-400/40 rounded-xl overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-cyan-400/20">
+                <span className="text-xs uppercase tracking-widest text-cyan-400">Clip Library</span>
+                <button
+                  onClick={() => setLibraryOpen(false)}
+                  className="text-cyan-400/70 hover:text-cyan-200 text-sm"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="flex gap-2 px-4 pt-3">
+                <button
+                  onClick={() => handleSwitchLibraryScope("mine")}
+                  className={`flex-1 rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest border ${
+                    libraryScope === "mine"
+                      ? "bg-cyan-400/20 border-cyan-400/60"
+                      : "bg-white/5 border-cyan-400/30 hover:bg-white/10"
+                  }`}
+                >
+                  My Clips
+                </button>
+                <button
+                  onClick={() => handleSwitchLibraryScope("shared")}
+                  className={`flex-1 rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest border ${
+                    libraryScope === "shared"
+                      ? "bg-cyan-400/20 border-cyan-400/60"
+                      : "bg-white/5 border-cyan-400/30 hover:bg-white/10"
+                  }`}
+                >
+                  Team Clips
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-2">
+                {libraryLoading && (
+                  <span className="text-[10px] text-cyan-200/60 uppercase tracking-widest">Loading…</span>
+                )}
+                {!libraryLoading &&
+                  (libraryScope === "mine" ? myClips : sharedClips).length === 0 && (
+                    <span className="text-[10px] text-cyan-200/60">
+                      {libraryScope === "mine"
+                        ? "No saved clips yet — upload a video and hit \"Save to Library\"."
+                        : "No shared clips yet."}
+                    </span>
+                  )}
+                {(libraryScope === "mine" ? myClips : sharedClips).map((clip) => (
+                  <div
+                    key={clip.id}
+                    className="flex items-center gap-2 backdrop-blur-md bg-white/5 border border-cyan-400/20 hover:border-cyan-400/60 hover:bg-white/10 rounded-lg overflow-hidden"
+                  >
+                    <button
+                      onClick={() => handleLoadClipFromLibrary(clip)}
+                      className="flex-1 text-left px-3 py-2"
+                    >
+                      <p className="text-xs text-cyan-200">{clip.name}</p>
+                      <p className="text-[10px] text-cyan-200/50">
+                        {libraryScope === "shared" ? clip.owner_email : new Date(clip.created_at).toLocaleDateString()}
+                      </p>
+                    </button>
+                    {clip.owner_email === session?.user?.email && (
+                      <button
+                        onClick={(e) => handleDeleteClip(clip, e)}
+                        title="Delete clip"
+                        className="px-3 py-2 text-red-400/70 hover:text-red-300 text-xs"
+                      >
+                        🗑
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
           </div>
         )}
       </div>

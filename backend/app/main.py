@@ -19,11 +19,16 @@ import requests
 
 import asyncio
 
+from bson import ObjectId
+from bson.errors import InvalidId
+
+from app.cloudinary_client import delete_clip, upload_clip, upload_snapshot
 from app.db import get_db, is_connected
 from app.inference import clahe_correct, coral_bleaching_ratio, predict_with_roboflow
 from app.obis_client import fetch_obis_species_data
 from app.report import generate_mission_report, log_detections
 from app.telemetry import TelemetrySimulator
+from datetime import datetime, timezone
 
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 
@@ -133,6 +138,190 @@ async def analyze_frame(file: UploadFile = File(...), conf_threshold: float = 0.
 
     return FrameAnalysisResponse(
         boxes=boxes, classifications=classifications, coral_bleaching_ratio=frame_ratio
+    )
+
+
+class SnapshotResponse(BaseModel):
+    url: str
+    public_id: str
+    saved_to_db: bool
+
+
+class ClipResponse(BaseModel):
+    id: str
+    url: str
+    name: str
+    shared: bool
+    owner_email: str
+    created_at: str
+
+
+@app.post("/clips", response_model=ClipResponse)
+async def save_clip(
+    file: UploadFile = File(...),
+    name: str = "Untitled clip",
+    owner_email: str = "",
+    shared: bool = False,
+):
+    """Saves a video to the researcher's personal library, or the shared
+    team library if `shared=True`. This is the one-time "manual work" a
+    researcher does when they first bring a clip in — after this, loading
+    it again is just a click from the My Clips / Team Clips panel, never
+    a re-upload."""
+    if not owner_email:
+        raise HTTPException(status_code=400, detail="owner_email is required")
+
+    raw_bytes = await file.read()
+
+    try:
+        upload_result = upload_clip(raw_bytes, filename=file.filename or "clip.mp4")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Cloudinary upload failed: {exc}")
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Clip library is unavailable right now (database not connected). "
+                   "The video wasn't saved — try again shortly.",
+        )
+
+    record = {
+        "url": upload_result["url"],
+        "public_id": upload_result["public_id"],
+        "name": name,
+        "owner_email": owner_email,
+        "shared": shared,
+        "created_at": datetime.now(timezone.utc),
+    }
+    result = db["clips"].insert_one(record)
+
+    return ClipResponse(
+        id=str(result.inserted_id),
+        url=record["url"],
+        name=record["name"],
+        shared=record["shared"],
+        owner_email=record["owner_email"],
+        created_at=record["created_at"].isoformat(),
+    )
+
+
+@app.get("/clips", response_model=List[ClipResponse])
+async def list_clips(scope: str = "mine", owner_email: str = ""):
+    """scope="mine" returns only this researcher's own clips (requires
+    owner_email). scope="shared" returns every clip anyone has marked
+    shared, regardless of who's asking."""
+    db = get_db()
+    if db is None:
+        return []  # Degrade to an empty library rather than erroring the whole page
+
+    if scope == "shared":
+        query = {"shared": True}
+    else:
+        if not owner_email:
+            raise HTTPException(status_code=400, detail="owner_email is required for scope=mine")
+        query = {"owner_email": owner_email}
+
+    docs = db["clips"].find(query).sort("created_at", -1).limit(100)
+    return [
+        ClipResponse(
+            id=str(doc["_id"]),
+            url=doc["url"],
+            name=doc.get("name", "Untitled clip"),
+            shared=doc.get("shared", False),
+            owner_email=doc.get("owner_email", ""),
+            created_at=doc["created_at"].isoformat() if doc.get("created_at") else "",
+        )
+        for doc in docs
+    ]
+
+
+@app.delete("/clips/{clip_id}")
+async def remove_clip(clip_id: str, owner_email: str):
+    """Deletes a clip from both Mongo and Cloudinary. Ownership-checked:
+    only the researcher who originally saved a clip can delete it, even if
+    it's currently shared with the team — sharing makes a clip visible to
+    others, it doesn't hand over deletion rights."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Clip library is unavailable right now")
+
+    try:
+        oid = ObjectId(clip_id)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid clip id")
+
+    doc = db["clips"].find_one({"_id": oid})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    if doc.get("owner_email") != owner_email:
+        raise HTTPException(status_code=403, detail="Only the clip's owner can delete it")
+
+    try:
+        delete_clip(doc["public_id"])
+    except Exception as exc:
+        # Still remove the DB record even if Cloudinary cleanup fails —
+        # a dangling unlisted file in Cloudinary is a much smaller problem
+        # than a clip the researcher can't get rid of from their library.
+        print(f"[clips] Cloudinary delete failed for {doc['public_id']}: {exc}")
+
+    db["clips"].delete_one({"_id": oid})
+    return {"deleted": True}
+
+
+@app.post("/snapshot", response_model=SnapshotResponse)
+async def create_snapshot(
+    file: UploadFile = File(...),
+    depth: str = "",
+    coords: str = "",
+    temp: str = "",
+    salinity: str = "",
+    heading: str = "",
+    species_query: str = "",
+):
+    """Uploads a Discovery Snapshot (triggered by the gamepad's 'A' button)
+    to Cloudinary, then logs a record of it — image URL plus whatever
+    mission telemetry/species context was active at capture time — to
+    Mongo if it's connected. Falls back to upload-only (no DB record) if
+    Mongo is currently down, same graceful-degradation pattern used
+    elsewhere in this API."""
+    raw_bytes = await file.read()
+
+    try:
+        upload_result = upload_snapshot(raw_bytes, filename=file.filename or "snapshot.jpg")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Cloudinary upload failed: {exc}")
+
+    saved_to_db = False
+    db = get_db()
+    if db is not None:
+        try:
+            db["snapshots"].insert_one(
+                {
+                    "url": upload_result["url"],
+                    "public_id": upload_result["public_id"],
+                    "captured_at": datetime.now(timezone.utc),
+                    "telemetry": {
+                        "depth": depth,
+                        "coords": coords,
+                        "temp": temp,
+                        "salinity": salinity,
+                        "heading": heading,
+                    },
+                    "species_query": species_query,
+                }
+            )
+            saved_to_db = True
+        except Exception as exc:
+            # Upload already succeeded — don't fail the whole request just
+            # because the DB write didn't. The image is safe either way.
+            print(f"[snapshot] Cloudinary upload OK but Mongo write failed: {exc}")
+
+    return SnapshotResponse(
+        url=upload_result["url"],
+        public_id=upload_result["public_id"],
+        saved_to_db=saved_to_db,
     )
 
 
