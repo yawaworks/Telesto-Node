@@ -22,6 +22,10 @@ import asyncio
 from bson import ObjectId
 from bson.errors import InvalidId
 
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
 from app.cloudinary_client import delete_clip, upload_clip, upload_snapshot
 from app.db import get_db, is_connected
 from app.inference import clahe_correct, coral_bleaching_ratio, predict_with_roboflow
@@ -29,10 +33,15 @@ from app.obis_client import fetch_obis_species_data
 from app.report import generate_mission_report, log_detections
 from app.telemetry import TelemetrySimulator
 from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 
 app = FastAPI(title="Telesto Node Inference API")
+
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -97,7 +106,8 @@ def health():
 
 
 @app.post("/analyze-frame", response_model=FrameAnalysisResponse)
-async def analyze_frame(file: UploadFile = File(...), conf_threshold: float = 0.2):
+@limiter.limit("60/minute")
+async def analyze_frame(request: Request, file: UploadFile = File(...), conf_threshold: float = 0.2):
     """Runs every enabled Roboflow model against this frame (marine-fishes
     species detection + the coral bleach classifier by default), merging
     results into one response, and logs the detections for the mission
@@ -157,7 +167,9 @@ class ClipResponse(BaseModel):
 
 
 @app.post("/clips", response_model=ClipResponse)
+@limiter.limit("10/minute")
 async def save_clip(
+    request: Request,
     file: UploadFile = File(...),
     name: str = "Untitled clip",
     owner_email: str = "",
@@ -207,7 +219,8 @@ async def save_clip(
 
 
 @app.get("/clips", response_model=List[ClipResponse])
-async def list_clips(scope: str = "mine", owner_email: str = ""):
+@limiter.limit("60/minute")
+async def list_clips(request: Request, scope: str = "mine", owner_email: str = ""):
     """scope="mine" returns only this researcher's own clips (requires
     owner_email). scope="shared" returns every clip anyone has marked
     shared, regardless of who's asking."""
@@ -237,7 +250,8 @@ async def list_clips(scope: str = "mine", owner_email: str = ""):
 
 
 @app.delete("/clips/{clip_id}")
-async def remove_clip(clip_id: str, owner_email: str):
+@limiter.limit("20/minute")
+async def remove_clip(request: Request, clip_id: str, owner_email: str):
     """Deletes a clip from both Mongo and Cloudinary. Ownership-checked:
     only the researcher who originally saved a clip can delete it, even if
     it's currently shared with the team — sharing makes a clip visible to
@@ -271,7 +285,9 @@ async def remove_clip(clip_id: str, owner_email: str):
 
 
 @app.post("/snapshot", response_model=SnapshotResponse)
+@limiter.limit("30/minute")
 async def create_snapshot(
+    request: Request,
     file: UploadFile = File(...),
     depth: str = "",
     coords: str = "",
@@ -326,7 +342,9 @@ async def create_snapshot(
 
 
 @app.get("/export-report")
+@limiter.limit("10/minute")
 async def export_report(
+    request: Request,
     depth: str = "42.6 m",
     coords: str = "11.3500 N, 144.2400 E",
     temp: str = "17.2°C",
@@ -353,22 +371,45 @@ async def export_report(
 
 
 ALLOWED_VIDEO_HOSTS_NOTE = (
-    "No allowlist is enforced here for hackathon simplicity — in production, "
-    "restrict this to a known set of trusted research video hosts to avoid "
-    "turning this into an open proxy."
+    "Restricted to a known set of trusted video hosts to prevent this "
+    "endpoint from being used as an open proxy. Add more via the "
+    "ALLOWED_VIDEO_HOSTS env var (comma-separated hostnames) if needed."
 )
+
+_DEFAULT_ALLOWED_VIDEO_HOSTS = {
+    "res.cloudinary.com",  # required — Clip Library loads saved clips through this proxy
+    "www.noaa.gov",
+    "oceanexplorer.noaa.gov",
+    "www.ncei.noaa.gov",
+}
+_env_hosts = os.getenv("ALLOWED_VIDEO_HOSTS", "")
+ALLOWED_VIDEO_HOSTS = _DEFAULT_ALLOWED_VIDEO_HOSTS | {
+    h.strip().lower() for h in _env_hosts.split(",") if h.strip()
+}
 
 
 @app.get("/proxy-video")
-async def proxy_video(url: str, request: Request):
+@limiter.limit("20/minute")
+async def proxy_video(request: Request, url: str):
     """Fetches a remote video on the server's behalf and re-serves it with
     permissive CORS headers, so footage from hosts that don't allow direct
     cross-origin canvas capture (e.g. NOAA's archive) can still be played
     and analyzed without the researcher needing to manually download and
     re-upload the file first. Supports Range requests for proper seeking.
+
+    Restricted to ALLOWED_VIDEO_HOSTS to prevent this from being usable as
+    an open proxy to fetch arbitrary URLs through this server.
     """
     if not url.lower().startswith(("http://", "https://")):
         raise HTTPException(status_code=400, detail="Only http(s) URLs are supported")
+
+    hostname = (urlparse(url).hostname or "").lower()
+    if hostname not in ALLOWED_VIDEO_HOSTS:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Host '{hostname}' is not on the allowed video host list. "
+                   f"Contact an admin to add it via ALLOWED_VIDEO_HOSTS.",
+        )
 
     upstream_headers = {}
     range_header = request.headers.get("range")
@@ -411,7 +452,8 @@ async def proxy_video(url: str, request: Request):
 
 
 @app.get("/species-data")
-async def species_data(scientific_name: str, max_records: int = 200):
+@limiter.limit("30/minute")
+async def species_data(request: Request, scientific_name: str, max_records: int = 200):
     df = fetch_obis_species_data(scientific_name, max_records=max_records)
 
     if df is None or df.empty:
