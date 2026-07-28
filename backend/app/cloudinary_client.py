@@ -1,14 +1,11 @@
-import os
-
 import cloudinary
 import cloudinary.uploader
 
-cloudinary.config(
-    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
-    api_key=os.getenv("CLOUDINARY_API_KEY"),
-    api_secret=os.getenv("CLOUDINARY_API_SECRET"),
-    secure=True,
-)
+# cloudinary.config() with no arguments auto-detects the CLOUDINARY_URL env
+# var (format: cloudinary://<api_key>:<api_secret>@<cloud_name>) and pulls
+# cloud_name/api_key/api_secret out of it automatically. No need to set
+# three separate env vars if this one is already present.
+cloudinary.config(secure=True)
 
 
 def upload_snapshot(file_bytes: bytes, filename: str = "snapshot.jpg") -> dict:
