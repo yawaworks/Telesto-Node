@@ -1,0 +1,5 @@
+filename,species_present,is_bleached
+frame001.jpg,"Acropora cervicornis",no
+frame002.jpg,"Chromis viridis;Acropora cervicornis",no
+frame003.jpg,"",yes
+frame004.jpg,"Chromis viridis",na
