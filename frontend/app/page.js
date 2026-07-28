@@ -384,21 +384,25 @@ export default function MissionControl() {
 
   const isMapMode = viewMode === "map";
 
-  // All hooks above run unconditionally every render (required by the Rules
-  // of Hooks) — only the actual JSX output is gated on auth status here.
-  if (sessionStatus === "loading") {
-    return (
-      <div className="min-h-screen bg-black text-cyan-200 flex items-center justify-center font-mono text-sm">
-        Checking mission clearance…
-      </div>
-    );
-  }
   if (sessionStatus === "unauthenticated") {
     return null; // redirect to /login is already in flight via the effect above
   }
 
   return (
     <div className="relative w-full h-screen overflow-hidden bg-black text-cyan-200">
+      {sessionStatus === "loading" && (
+        // Overlay, not an early-return swap of the whole tree — the <video>
+        // below must mount on the FIRST real render, otherwise the
+        // source-setting useEffect (deps: videoSourceMode/uploadedVideoUrl/
+        // videoUrlInput) runs once while videoRef.current is still null,
+        // bails out silently, and then never runs again once the video
+        // element actually exists (those deps never change between the
+        // "loading" and "authenticated" states) — leaving <video> with no
+        // src forever. Keeping <video> mounted the whole time avoids that.
+        <div className="absolute inset-0 z-50 bg-black flex items-center justify-center font-mono text-sm">
+          Checking mission clearance…
+        </div>
+      )}
       <video
         ref={videoRef}
         id="feed"
