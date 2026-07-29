@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
+INTERNAL_SYNC_SECRET = os.getenv("INTERNAL_SYNC_SECRET", "")
 
 app = FastAPI(title="Telesto Node Inference API")
 
@@ -75,6 +76,19 @@ class FrameAnalysisResponse(BaseModel):
     boxes: List[BoundingBox]
     classifications: List[Classification] = []
     coral_bleaching_ratio: Optional[float] = None
+
+
+class SpeciesSyncRecord(BaseModel):
+    scientific_name: str
+    latitude: float
+    longitude: float
+    depth_meters: Optional[float] = None
+    country: Optional[str] = None
+    source: str  # "obis" or "inaturalist"
+
+
+class SpeciesSyncPayload(BaseModel):
+    records: List[SpeciesSyncRecord]
 
 
 def _clean(value):
@@ -511,6 +525,50 @@ async def species_data(request: Request, scientific_name: str, max_records: int 
         )
 
     return {"type": "FeatureCollection", "features": features}
+
+
+@app.post("/internal/species-sync")
+@limiter.limit("10/minute")
+async def species_sync(request: Request, payload: SpeciesSyncPayload):
+    """Internal-only endpoint for the n8n scheduled sync workflow to push
+    normalized OBIS/iNaturalist records into Mongo. Not meant for the
+    frontend — protected by a shared secret header rather than user auth,
+    since n8n has no session/login of its own.
+
+    Replaces hitting OBIS live on every map load: the frontend's
+    /species-data can be pointed at this cache instead once it's
+    populated, cutting both latency and OBIS API load.
+    """
+    provided_secret = request.headers.get("x-sync-secret", "")
+    if not INTERNAL_SYNC_SECRET or provided_secret != INTERNAL_SYNC_SECRET:
+        raise HTTPException(status_code=403, detail="Invalid or missing sync secret")
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database unavailable — sync deferred")
+
+    now = datetime.now(timezone.utc)
+    upserted = 0
+    for record in payload.records:
+        db["species_cache"].update_one(
+            {
+                "scientific_name": record.scientific_name,
+                "latitude": record.latitude,
+                "longitude": record.longitude,
+                "source": record.source,
+            },
+            {
+                "$set": {
+                    "depth_meters": record.depth_meters,
+                    "country": record.country,
+                    "synced_at": now,
+                }
+            },
+            upsert=True,
+        )
+        upserted += 1
+
+    return {"synced": upserted, "synced_at": now.isoformat()}
 
 
 @app.websocket("/ws/telemetry")
