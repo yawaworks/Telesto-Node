@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
 
@@ -14,55 +14,25 @@ const RIGHT_PANEL_WIDTH = 200;
 const LABEL_HEIGHT = 16;
 const TAG_HEIGHT = 13;
 
-// Tooltip is w-64 (256px) — used to clamp its center position so it can
-// never render partially off-screen or under the side chrome panels.
-const TOOLTIP_WIDTH = 256;
-const TOOLTIP_HALF_WIDTH = TOOLTIP_WIDTH / 2;
-const TOOLTIP_EDGE_PADDING = 8;
-const TOOLTIP_GAP = 8; // gap between the box edge and the tooltip
-
 const HOVER_DEBOUNCE_MS = 300;
-// Grace period before actually hiding the tooltip once the mouse leaves
-// the box's hit region. Without this, moving the cursor from the box
-// toward the tooltip itself (to read more, or click the link) crosses a
-// gap of "no hit" canvas space and the tooltip vanishes before you ever
-// get there. This delay gives you time to land on the tooltip, which
-// then keeps itself open via its own hover state.
-const HIDE_DELAY_MS = 250;
 
 /**
  * Renders YOLO bounding boxes on a <canvas> positioned exactly over the
  * given <video> element, and shows an AI-generated species detail tooltip
  * on hover. Boxes are in the original frame's pixel space (from the
  * backend), so we scale them to the video's displayed size.
- *
- * `boxes` are species currently visible in frame — drawn solid.
- * `ghostBoxes` are species seen within the last few seconds but no
- * longer in frame — drawn faint/dashed at their last known position.
- * Hovering a ghost box seeks the video back to the exact moment it was
- * last seen (video.currentTime = ghost.videoTime) so the species
- * reappears for as long as you're hovering, then playback resumes
- * forward from there once you stop.
- *
- * Hovering either kind of box pauses the video so whatever's in the box
- * stays framed while you read the tooltip, instead of swimming out of
- * frame (or, for a ghost, immediately vanishing again) mid-read.
  */
 export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
   const canvasRef = useRef(null);
-  const tooltipRef = useRef(null);
-  const scaledBoxesRef = useRef([]); // last-drawn boxes (real + ghost) in canvas pixel space, for hit-testing
-  const anchorRef = useRef({ x: 0, boxTop: 0, boxBottom: 0 });
+  const scaledBoxesRef = useRef([]); // last-drawn boxes in canvas pixel space, for hit-testing
 
   const [hoveredLabel, setHoveredLabel] = useState(null);
-  const [hoveredIsGhost, setHoveredIsGhost] = useState(false);
-  const [tooltipStyle, setTooltipStyle] = useState({ top: 0, left: 0, visibility: "hidden" });
+  const [tooltipPos, setTooltipPos] = useState({ x: 0, y: 0 });
   const [speciesData, setSpeciesData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState(null);
 
   const debounceRef = useRef(null);
-  const hideTimeoutRef = useRef(null);
   const abortRef = useRef(null);
 
   useEffect(() => {
@@ -85,23 +55,39 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
 
       const scaledBoxes = [];
 
-      function drawBox({ label, confidence, x1, y1, x2, y2 }, isGhost, videoTime) {
+      // Ghost boxes — I'm assuming these represent carried-over/predicted
+      // detections between fresh inference frames (smoothing out flicker),
+      // not confirmed detections. Rendered very faint, no label chip, and
+      // deliberately excluded from hover/hit-testing below — hovering a
+      // prediction to get species info felt like it'd be misleading. Flag
+      // this to me if ghostBoxes means something different and I'll adjust.
+      ghostBoxes.forEach(({ x1, y1, x2, y2 }) => {
+        const gx = x1 * scaleX;
+        const gy = y1 * scaleY;
+        const gw = (x2 - x1) * scaleX;
+        const gh = (y2 - y1) * scaleY;
+
+        ctx.strokeStyle = "#5a6a72";
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.globalAlpha = 0.4;
+        ctx.strokeRect(gx, gy, gw, gh);
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+      });
+
+      boxes.forEach(({ label, confidence, x1, y1, x2, y2 }) => {
         const bx = x1 * scaleX;
         const by = y1 * scaleY;
         const bw = (x2 - x1) * scaleX;
         const bh = (y2 - y1) * scaleY;
-        const lowConfidence = !isGhost && confidence < 0.75;
+        const lowConfidence = confidence < 0.75;
 
-        scaledBoxes.push({ label, confidence, bx, by, bw, bh, ghost: isGhost, videoTime });
+        scaledBoxes.push({ label, confidence, bx, by, bw, bh });
 
-        ctx.strokeStyle = isGhost ? "#a48a55" : "#8fa3ad";
+        ctx.strokeStyle = "#8fa3ad";
         ctx.lineWidth = 2;
-        if (isGhost) {
-          // Faint + dashed: signals "recently here, hover to bring back"
-          // rather than a live, currently-visible detection.
-          ctx.setLineDash([3, 5]);
-          ctx.globalAlpha = 0.35;
-        } else if (lowConfidence) {
+        if (lowConfidence) {
           ctx.setLineDash([5, 4]);
           ctx.globalAlpha = 0.7;
         } else {
@@ -112,10 +98,8 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
         ctx.setLineDash([]);
         ctx.globalAlpha = 1;
 
-        const labelText = isGhost
-          ? `${label} — hover to rewind`
-          : `${label} ${(confidence * 100).toFixed(0)}%`;
-        const tagText = isGhost ? "last seen nearby" : "unvalidated model";
+        const labelText = `${label} ${(confidence * 100).toFixed(0)}%`;
+        const tagText = "unvalidated model";
         ctx.font = "12px monospace";
         const labelWidth = ctx.measureText(labelText).width;
         ctx.font = "9px monospace";
@@ -135,26 +119,18 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
           blockLeft = Math.max(4, Math.min(canvas.width - blockWidth - 4, bx));
         }
 
-        const labelAlpha = isGhost ? 0.55 : 0.85;
-        ctx.fillStyle = isGhost
-          ? `rgba(164, 138, 85, ${labelAlpha})`
-          : `rgba(143, 163, 173, ${labelAlpha})`;
+        ctx.fillStyle = "rgba(143, 163, 173, 0.85)";
         ctx.fillRect(blockLeft, blockTop, blockWidth, LABEL_HEIGHT);
-        ctx.fillStyle = isGhost ? "#241d10" : "#0c1113";
+        ctx.fillStyle = "#0c1113";
         ctx.font = "12px monospace";
         ctx.fillText(labelText, blockLeft + 4, blockTop + 12);
 
-        if (!isGhost) {
-          ctx.fillStyle = "rgba(164, 138, 85, 0.85)";
-          ctx.fillRect(blockLeft, blockTop + LABEL_HEIGHT, blockWidth, TAG_HEIGHT);
-          ctx.fillStyle = "#241d10";
-          ctx.font = "9px monospace";
-          ctx.fillText(tagText, blockLeft + 4, blockTop + LABEL_HEIGHT + 10);
-        }
-      }
-
-      boxes.forEach((b) => drawBox(b, false, undefined));
-      ghostBoxes.forEach((g) => drawBox(g, true, g.videoTime));
+        ctx.fillStyle = "rgba(164, 138, 85, 0.85)";
+        ctx.fillRect(blockLeft, blockTop + LABEL_HEIGHT, blockWidth, TAG_HEIGHT);
+        ctx.fillStyle = "#241d10";
+        ctx.font = "9px monospace";
+        ctx.fillText(tagText, blockLeft + 4, blockTop + LABEL_HEIGHT + 10);
+      });
 
       scaledBoxesRef.current = scaledBoxes;
     }
@@ -165,39 +141,6 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
 
     return () => resizeObserver.disconnect();
   }, [videoRef, boxes, ghostBoxes]);
-
-  // Safety net: if this component unmounts (e.g. switching to Bathymetry
-  // Map view) while the video is paused for a hover, make sure it resumes
-  // rather than silently staying frozen when the researcher switches back.
-  useEffect(() => {
-    return () => {
-      videoRef.current?.play().catch(() => {});
-    };
-  }, [videoRef]);
-
-  // Recomputes the tooltip's actual on-screen position against its real
-  // measured height. Flips to below the box if there isn't room above it
-  // to clear the top chrome bar, and clamps against the bottom of the
-  // viewport too, so long species descriptions can never render partially
-  // off-screen in either direction.
-  const positionTooltip = useCallback(() => {
-    if (!tooltipRef.current) return;
-    const { x, boxTop, boxBottom } = anchorRef.current;
-    const height = tooltipRef.current.offsetHeight;
-
-    let top = boxTop - height - TOOLTIP_GAP;
-    if (top < TOP_BAR_HEIGHT) {
-      top = boxBottom + TOOLTIP_GAP;
-    }
-    const maxTop = window.innerHeight - height - TOOLTIP_EDGE_PADDING;
-    top = Math.min(top, maxTop);
-
-    setTooltipStyle({ top, left: x, visibility: "visible" });
-  }, []);
-
-  useLayoutEffect(() => {
-    if (hoveredLabel) positionTooltip();
-  }, [hoveredLabel, speciesData, loading, fetchError, positionTooltip]);
 
   const fetchSpeciesInfo = useCallback((label) => {
     if (abortRef.current) abortRef.current.abort();
@@ -230,31 +173,6 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
       .finally(() => setLoading(false));
   }, []);
 
-  const cancelHide = useCallback(() => {
-    if (hideTimeoutRef.current) {
-      clearTimeout(hideTimeoutRef.current);
-      hideTimeoutRef.current = null;
-    }
-  }, []);
-
-  const doHide = useCallback(() => {
-    setHoveredLabel(null);
-    setHoveredIsGhost(false);
-    setSpeciesData(null);
-    setFetchError(null);
-    setTooltipStyle((s) => ({ ...s, visibility: "hidden" }));
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    // Resumes playback from wherever currentTime ended up — if the hover
-    // was on a ghost box, that's the rewound timestamp, so the video
-    // continues forward from the moment the species was last seen.
-    videoRef.current?.play().catch(() => {});
-  }, [videoRef]);
-
-  const scheduleHide = useCallback(() => {
-    cancelHide();
-    hideTimeoutRef.current = setTimeout(doHide, HIDE_DELAY_MS);
-  }, [cancelHide, doHide]);
-
   function handleMouseMove(e) {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -278,71 +196,30 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
 
     if (!hit) {
       if (hoveredLabel !== null) {
-        // Don't hide immediately — give the mouse a moment to reach the
-        // tooltip itself (which sits above/below this box, outside the
-        // hit region). The tooltip's own onMouseEnter cancels this if the
-        // cursor actually lands on it.
-        scheduleHide();
+        console.debug("[DetectionOverlay] left box:", hoveredLabel);
+        setHoveredLabel(null);
+        setSpeciesData(null);
+        setFetchError(null);
+        if (debounceRef.current) clearTimeout(debounceRef.current);
       }
       return;
     }
 
-    // Still hovering a box — cancel any pending hide from a moment ago.
-    cancelHide();
-
-    // Clamp the tooltip's horizontal center so the 256px-wide box can
-    // never render partially under the left/right chrome panels or off
-    // the edge of the viewport, regardless of where the hovered box sits.
-    let clampedX = hit.bx + hit.bw / 2;
-    clampedX = Math.max(TOOLTIP_HALF_WIDTH + LEFT_PANEL_WIDTH + TOOLTIP_EDGE_PADDING, clampedX);
-    clampedX = Math.min(
-      rect.width - TOOLTIP_HALF_WIDTH - RIGHT_PANEL_WIDTH - TOOLTIP_EDGE_PADDING,
-      clampedX
-    );
-
-    anchorRef.current = { x: clampedX, boxTop: hit.by, boxBottom: hit.by + hit.bh };
-    // Reposition immediately using whatever height the tooltip currently
-    // has (handles the cursor moving around within the same box).
-    positionTooltip();
+    setTooltipPos({ x: hit.bx + hit.bw / 2, y: hit.by });
 
     if (hit.label !== hoveredLabel) {
-      console.debug("[DetectionOverlay] hovering box:", hit.label, "ghost:", !!hit.ghost);
-
-      const video = videoRef.current;
-      if (video) {
-        // Pause on any hover — real or ghost — so the framed species
-        // doesn't swim off (or vanish, for a ghost) while being read.
-        video.pause();
-        if (hit.ghost && typeof hit.videoTime === "number") {
-          // The actual rewind: jump back to the exact moment this
-          // species was last seen, bringing it back into the box.
-          video.currentTime = hit.videoTime;
-        }
-      }
-
+      console.debug("[DetectionOverlay] hovering box:", hit.label, "at", { bx: hit.bx, by: hit.by });
       setHoveredLabel(hit.label);
-      setHoveredIsGhost(!!hit.ghost);
       if (debounceRef.current) clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(() => fetchSpeciesInfo(hit.label), HOVER_DEBOUNCE_MS);
     }
   }
 
-  function handleCanvasMouseLeave() {
-    if (hoveredLabel !== null) {
-      // Same grace period as the no-hit case — the mouse may be headed
-      // straight for the tooltip if it overlaps the canvas edge.
-      scheduleHide();
-    }
-  }
-
-  // The tooltip itself captures pointer events, so hovering it keeps the
-  // whole thing open — including enough time to actually click "read more".
-  function handleTooltipMouseEnter() {
-    cancelHide();
-  }
-
-  function handleTooltipMouseLeave() {
-    scheduleHide();
+  function handleMouseLeave() {
+    setHoveredLabel(null);
+    setSpeciesData(null);
+    setFetchError(null);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
   }
 
   return (
@@ -352,26 +229,15 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
         className="absolute inset-0 w-full h-full"
         style={{ pointerEvents: "auto", cursor: hoveredLabel ? "help" : "default" }}
         onMouseMove={handleMouseMove}
-        onMouseLeave={handleCanvasMouseLeave}
+        onMouseLeave={handleMouseLeave}
       />
 
       {hoveredLabel && (
         <div
-          ref={tooltipRef}
-          onMouseEnter={handleTooltipMouseEnter}
-          onMouseLeave={handleTooltipMouseLeave}
-          className="absolute z-20 w-64 -translate-x-1/2 bg-[#1c2226] border border-[#3a444a] rounded-lg px-3 py-2.5 font-mono text-xs"
-          style={{
-            left: tooltipStyle.left,
-            top: tooltipStyle.top,
-            visibility: tooltipStyle.visibility,
-          }}
+          className="absolute z-20 w-64 -translate-x-1/2 -translate-y-full bg-[#1c2226] border border-[#3a444a] rounded-lg px-3 py-2.5 pointer-events-none font-mono text-xs"
+          style={{ left: tooltipPos.x, top: Math.max(64, tooltipPos.y - 8) }}
         >
           <p className="text-[#d3dbe0] font-bold mb-1.5">{hoveredLabel}</p>
-
-          {hoveredIsGhost && (
-            <p className="text-[#a48a55] mb-1.5">⏪ Rewound to last sighting</p>
-          )}
 
           {loading && <p className="text-[#5a6a72]">Looking up species info…</p>}
 
@@ -400,7 +266,7 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
                       href={speciesData.wikipedia_url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="underline hover:text-[#8fa3ad]"
+                      className="underline hover:text-[#8fa3ad] pointer-events-auto"
                     >
                       read more
                     </a>

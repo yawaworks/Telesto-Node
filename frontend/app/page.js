@@ -13,13 +13,9 @@ import DetectionOverlay from "../components/DetectionOverlay";
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
 const BLEACHING_ALERT_THRESHOLD = 0.4;
 const DEFAULT_SPECIES = "Acropora cervicornis";
-// Hosted on Cloudinary instead of committed to the repo — a demo-length
-// video file is too large to check into GitHub sensibly, and this way it
-// can be swapped without a redeploy. Replace with your own upload's URL.
 const DEFAULT_VIDEO_SRC =
   process.env.NEXT_PUBLIC_DEFAULT_VIDEO_URL ||
   "https://res.cloudinary.com/YOUR_CLOUD_NAME/video/upload/rov-feed.mp4";
-// n8n "Mission Report Email" workflow's production webhook URL.
 const N8N_MISSION_REPORT_WEBHOOK_URL =
   process.env.NEXT_PUBLIC_N8N_MISSION_REPORT_WEBHOOK_URL ||
   "https://yawaworks.app.n8n.cloud/webhook/email-mission-report";
@@ -41,10 +37,6 @@ export default function MissionControl() {
   const webcamStreamRef = useRef(null);
 
   const { telemetry } = useTelemetry();
-  // Gamepad navigation is initialized once (empty-deps effect below), so its
-  // onSnapshot callback would otherwise close over whatever `telemetry` was
-  // on that first render and never see updates. A ref sidesteps that without
-  // re-running gamepad setup on every telemetry tick.
   const telemetryRef = useRef(telemetry);
   useEffect(() => {
     telemetryRef.current = telemetry;
@@ -56,35 +48,28 @@ export default function MissionControl() {
   const [emailingReport, setEmailingReport] = useState(false);
   const [emailReportMessage, setEmailReportMessage] = useState(null);
   const [snapshotMessage, setSnapshotMessage] = useState(null);
-  // Populated further down (handleDiscoverySnapshot is defined after the
-  // video-source handlers). Declared here, before the gamepad-init effect
-  // that wires it up, purely for readability — functionally it's safe
-  // either way since the effect only dereferences .current() on an actual
-  // button press, long after the full component has rendered.
   const handleDiscoverySnapshotRef = useRef(() => {});
 
-  // Video source: "default" (bundled clip) | "upload" (user file) | "webcam" (live camera)
   const [videoSourceMode, setVideoSourceMode] = useState("default");
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState(null);
   const [webcamError, setWebcamError] = useState(null);
   const [videoUrlInput, setVideoUrlInput] = useState("");
-  // Separate from webcamError: true whenever the *currently active* video
-  // element failed to load, regardless of source mode. Drives the HUD
-  // status badge so a broken/missing clip shows "Feed Error" instead of
-  // sitting on "Connecting..." forever with no explanation.
   const [videoLoadError, setVideoLoadError] = useState(false);
 
-  // Clip library (Save to Library / My Clips / Team Clips)
-  const [uploadedFile, setUploadedFile] = useState(null); // raw File, kept so we can actually upload it on Save
+  const [uploadedFile, setUploadedFile] = useState(null);
   const [savingClip, setSavingClip] = useState(false);
   const [shareClip, setShareClip] = useState(false);
   const [clipSaveMessage, setClipSaveMessage] = useState(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
-  const [libraryScope, setLibraryScope] = useState("mine"); // "mine" | "shared"
+  const [libraryScope, setLibraryScope] = useState("mine");
   const [myClips, setMyClips] = useState([]);
   const [sharedClips, setSharedClips] = useState([]);
   const [libraryLoading, setLibraryLoading] = useState(false);
 
+  // NOTE: ghostBoxes carried over from your working version — I don't have
+  // visibility into what useFrameDetection does with it internally, so
+  // it's passed straight through unchanged. See the note on DetectionOverlay
+  // below for how it's rendered.
   const { boxes, ghostBoxes, coralBleachingRatio, status } = useFrameDetection(videoRef, {
     enabled: viewMode === "video" && !videoLoadError,
     telemetry,
@@ -113,8 +98,6 @@ export default function MissionControl() {
     };
   }, []);
 
-  // Actually apply whichever video source is currently selected. Webcam
-  // needs the imperative srcObject API; file/default just use a normal src.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -128,19 +111,12 @@ export default function MissionControl() {
     } else if (videoSourceMode === "url" && videoUrlInput) {
       video.srcObject = null;
       video.crossOrigin = "anonymous";
-      // Route through our backend proxy so hosts that don't allow direct
-      // cross-origin canvas capture (most sites, including NOAA's archive)
-      // still work without the user needing to download-then-upload.
       video.src = `${API_BASE_URL}/proxy-video?url=${encodeURIComponent(videoUrlInput)}`;
       video.play().catch(() => {});
     } else {
       video.srcObject = null;
       const nextSrc =
         videoSourceMode === "upload" && uploadedVideoUrl ? uploadedVideoUrl : DEFAULT_VIDEO_SRC;
-      // External URLs (the Cloudinary-hosted default clip) need crossOrigin
-      // set so canvas.toBlob() in useFrameDetection doesn't throw a
-      // tainted-canvas security error. Local blob: URLs (uploaded files)
-      // are same-origin and don't need it, but setting it is harmless.
       if (nextSrc.startsWith("http")) {
         video.crossOrigin = "anonymous";
       } else {
@@ -151,7 +127,6 @@ export default function MissionControl() {
     }
   }, [videoSourceMode, uploadedVideoUrl, videoUrlInput]);
 
-  // Clean up webcam tracks whenever we leave webcam mode or unmount
   useEffect(() => {
     return () => {
       webcamStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -226,9 +201,7 @@ export default function MissionControl() {
       });
       if (!response.ok) throw new Error(`Save failed: ${response.status}`);
 
-      setClipSaveMessage({ type: "success", text: shareClip ? "Saved to Team Clips" : "Saved to My Clips" });
-      // Once saved, this exact file object is no longer needed for another
-      // save — but keep it playable, just prevent double-saving by accident.
+      setClipSaveMessage({ type: "success", text: shareClip ? "Saved to team clips" : "Saved to my clips" });
       setUploadedFile(null);
     } catch (err) {
       console.error("Save to library failed:", err);
@@ -270,7 +243,7 @@ export default function MissionControl() {
   }
 
   async function handleDeleteClip(clip, e) {
-    e.stopPropagation(); // don't trigger handleLoadClipFromLibrary on the same click
+    e.stopPropagation();
     if (!window.confirm(`Delete "${clip.name}"? This can't be undone.`)) return;
 
     try {
@@ -280,9 +253,6 @@ export default function MissionControl() {
       });
       if (!response.ok) throw new Error(`Delete failed: ${response.status}`);
 
-      // Remove it from whichever list(s) currently hold it locally, rather
-      // than re-fetching — a shared clip you own could be sitting in both
-      // "mine" and "shared" caches at once.
       setMyClips((prev) => prev.filter((c) => c.id !== clip.id));
       setSharedClips((prev) => prev.filter((c) => c.id !== clip.id));
     } catch (err) {
@@ -349,7 +319,6 @@ export default function MissionControl() {
       console.error("Discovery Snapshot failed:", err);
       setSnapshotMessage({ type: "error", text: "Snapshot failed — check connection" });
     } finally {
-      // Auto-dismiss the toast after a few seconds either way
       setTimeout(() => setSnapshotMessage(null), 3500);
     }
   }
@@ -388,11 +357,6 @@ export default function MissionControl() {
     }
   }
 
-  // Fires the n8n "Mission Report Email" workflow: it fetches the same
-  // /export-report PDF server-side and emails it as an attachment to the
-  // logged-in researcher, so they don't have to download-then-forward it
-  // manually. Sends to session.user.email rather than a typed-in address —
-  // simplest safe default, no risk of mis-sending a mission report.
   async function handleEmailReport() {
     const recipientEmail = session?.user?.email;
     if (!recipientEmail) return;
@@ -419,25 +383,22 @@ export default function MissionControl() {
 
   const isMapMode = viewMode === "map";
 
+  // Single slot for transient status messages (snapshot / email), so only
+  // one ever shows at a time instead of stacking in unrelated corners.
+  const activeToast = emailReportMessage || snapshotMessage;
+
   if (sessionStatus === "unauthenticated") {
-    return null; // redirect to /login is already in flight via the effect above
+    return null;
   }
 
   return (
-    <div className="relative w-full h-screen overflow-hidden bg-black text-cyan-200">
+    <div className="relative w-full h-screen overflow-hidden bg-[#171d20] text-[#d3dbe0] font-mono text-sm">
       {sessionStatus === "loading" && (
-        // Overlay, not an early-return swap of the whole tree — the <video>
-        // below must mount on the FIRST real render, otherwise the
-        // source-setting useEffect (deps: videoSourceMode/uploadedVideoUrl/
-        // videoUrlInput) runs once while videoRef.current is still null,
-        // bails out silently, and then never runs again once the video
-        // element actually exists (those deps never change between the
-        // "loading" and "authenticated" states) — leaving <video> with no
-        // src forever. Keeping <video> mounted the whole time avoids that.
-        <div className="absolute inset-0 z-50 bg-black flex items-center justify-center font-mono text-sm">
+        <div className="absolute inset-0 z-50 bg-[#171d20] flex items-center justify-center text-sm">
           Checking mission clearance…
         </div>
       )}
+
       <video
         ref={videoRef}
         id="feed"
@@ -447,11 +408,6 @@ export default function MissionControl() {
         loop={videoSourceMode !== "webcam"}
         playsInline
         onError={() => {
-          // Fires for ANY source mode now — previously this only reported
-          // errors when videoSourceMode === "url", so a missing/broken
-          // default clip (frontend/public/rov-feed.mp4) or a broken
-          // uploaded file failed completely silently, leaving the HUD
-          // stuck showing "Connecting..." forever with no explanation.
           setVideoLoadError(true);
           if (videoSourceMode === "url") {
             setWebcamError(
@@ -470,7 +426,6 @@ export default function MissionControl() {
         style={{ opacity: isMapMode ? 0 : 1 }}
       />
 
-      {/* Hidden file input, triggered by the Upload Video button */}
       <input
         ref={fileInputRef}
         type="file"
@@ -494,189 +449,286 @@ export default function MissionControl() {
         }}
       />
 
-      <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute top-4 left-4 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-4 py-2 shadow-[0_0_15px_rgba(34,211,238,0.25)]">
-          <p className="text-xs uppercase tracking-widest text-cyan-400">Depth</p>
-          <p className="text-2xl font-bold">{telemetry.depth}</p>
-        </div>
-
-        <div className="absolute top-4 right-4 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-4 py-2 text-right">
-          <p className="text-xs uppercase tracking-widest text-cyan-400">Coordinates</p>
-          <p className="text-sm">{telemetry.coords}</p>
-        </div>
-
-        <div className="absolute top-4 right-4 translate-y-16 pointer-events-auto backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-3 py-1 flex items-center gap-2 text-[10px]">
-          <span className="text-cyan-400/70">{session?.user?.email || session?.user?.name}</span>
-          <button
-            onClick={() => signOut({ callbackUrl: "/login" })}
-            className="uppercase tracking-widest text-red-400 hover:text-red-300"
-          >
-            Sign Out
-          </button>
-        </div>
-
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 pointer-events-auto flex gap-2">
+      {/* ================= TOP BAR — mode toggle / status / account. Nothing else lives here. ================= */}
+      <div className="absolute top-0 left-0 right-0 h-14 flex items-center justify-between px-4 bg-[#1c2226]/90 border-b border-[#3a444a] pointer-events-auto">
+        <div className="flex gap-2">
           <button
             onClick={() => setViewMode("video")}
-            className={`backdrop-blur-md border rounded-xl px-4 py-1 text-xs uppercase tracking-widest ${
+            className={`border rounded-lg px-3 py-1.5 text-xs uppercase tracking-widest ${
               !isMapMode
-                ? "bg-cyan-400/20 border-cyan-400/60"
-                : "bg-white/5 border-cyan-400/30 hover:bg-white/10"
+                ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
+                : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
             }`}
           >
-            ROV Feed
+            ROV feed
           </button>
           <button
             onClick={() => setViewMode("map")}
-            className={`backdrop-blur-md border rounded-xl px-4 py-1 text-xs uppercase tracking-widest ${
+            className={`border rounded-lg px-3 py-1.5 text-xs uppercase tracking-widest ${
               isMapMode
-                ? "bg-cyan-400/20 border-cyan-400/60"
-                : "bg-white/5 border-cyan-400/30 hover:bg-white/10"
+                ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
+                : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
             }`}
           >
-            Bathymetry Map
+            Bathymetry map
           </button>
         </div>
 
-        {!isMapMode && (
-          <div className="absolute top-16 left-1/2 -translate-x-1/2 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-4 py-1 flex items-center gap-2">
-            <span
-              className={`w-2 h-2 rounded-full ${
-                videoLoadError
-                  ? "bg-red-400"
+        <div className="flex items-center gap-2">
+          {!isMapMode ? (
+            <>
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  videoLoadError
+                    ? "bg-[#c47a6e]"
+                    : status === "live"
+                    ? "bg-[#8fa3ad] animate-pulse"
+                    : status === "error"
+                    ? "bg-[#c47a6e]"
+                    : "bg-[#a48a55] animate-pulse"
+                }`}
+              />
+              <span className="text-xs uppercase tracking-widest">
+                {videoLoadError
+                  ? "Feed error"
                   : status === "live"
-                  ? "bg-green-400 animate-pulse"
+                  ? "Inference live"
                   : status === "error"
-                  ? "bg-red-400"
-                  : "bg-yellow-400 animate-pulse"
-              }`}
-            />
-            <span className="text-xs uppercase tracking-widest">
-              {videoLoadError
-                ? "Feed Error — Check Video Source"
-                : status === "live"
-                ? "Inference Live"
-                : status === "error"
-                ? "Inference Error"
-                : "Connecting…"}
-            </span>
+                  ? "Inference error"
+                  : "Connecting…"}
+              </span>
+            </>
+          ) : (
+            <span className="text-xs uppercase tracking-widest text-[#5a6a72]">Map mode</span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-[#8fa3ad]">{session?.user?.email || session?.user?.name}</span>
+          <button
+            onClick={() => signOut({ callbackUrl: "/login" })}
+            className="text-xs uppercase tracking-widest text-[#c47a6e] hover:text-[#d99a8f]"
+          >
+            Sign out
+          </button>
+        </div>
+      </div>
+
+      {/* Species search — only relevant in map mode, sits just under the top bar */}
+      {isMapMode && (
+        <form
+          onSubmit={handleSpeciesSearch}
+          className="absolute top-[68px] left-1/2 -translate-x-1/2 pointer-events-auto flex gap-2"
+        >
+          <input
+            type="text"
+            value={speciesQuery}
+            onChange={(e) => setSpeciesQuery(e.target.value)}
+            placeholder="Scientific name (e.g. Acropora cervicornis)"
+            className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-1 text-xs text-[#d3dbe0] placeholder:text-[#5a6a72] outline-none focus:border-[#8fa3ad] w-64"
+          />
+          <button
+            type="submit"
+            className="bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-1 text-xs uppercase tracking-widest hover:bg-[#8fa3ad]/20"
+          >
+            Plot
+          </button>
+        </form>
+      )}
+
+      {/* ================= LEFT PANEL — one grouped telemetry card ================= */}
+      <div className="absolute top-[70px] left-4 w-56 bg-[#1c2226]/90 border border-[#3a444a] rounded-xl divide-y divide-[#3a444a] pointer-events-none">
+        <div className="px-4 py-2.5">
+          <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">Coordinates · measured</p>
+          <p className="text-sm">{telemetry.coords}</p>
+        </div>
+        <div className="px-4 py-2.5">
+          <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">
+            Temp · {telemetry.tempSource === "live" ? "measured" : "—"}
+          </p>
+          <p className="text-lg font-bold">{telemetry.temp}</p>
+        </div>
+        <div className="px-4 py-2.5">
+          <p className="text-[10px] uppercase tracking-widest text-[#a48a55]">Depth · simulated</p>
+          <p className="text-lg font-bold">{telemetry.depth}</p>
+        </div>
+        <div className="px-4 py-2.5">
+          <p className="text-[10px] uppercase tracking-widest text-[#a48a55]">Salinity · simulated</p>
+          <p className="text-sm border-b border-dashed border-[#a48a55] inline-block">{telemetry.salinity}</p>
+        </div>
+        <div className="px-4 py-2.5">
+          <p className="text-[10px] uppercase tracking-widest text-[#a48a55]">Heading · simulated</p>
+          <p className="text-sm border-b border-dashed border-[#a48a55] inline-block">{telemetry.heading}</p>
+        </div>
+        {!isMapMode && coralBleachingRatio !== null && (
+          <div className="px-4 py-2.5">
+            <p className="text-[10px] uppercase tracking-widest text-[#d8b877]">Coral · unvalidated model</p>
+            <p className={`text-sm ${alert ? "text-[#d8b877]" : ""}`}>
+              {(coralBleachingRatio * 100).toFixed(0)}% bleached
+            </p>
           </div>
         )}
+      </div>
 
-        {isMapMode && (
-          <form
-            onSubmit={handleSpeciesSearch}
-            className="absolute top-16 left-1/2 -translate-x-1/2 pointer-events-auto flex gap-2"
+      {isMapMode && (
+        <div className="absolute bottom-4 left-4 flex gap-4">
+          <div className="flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#8fa3ad]" />
+            <span className="text-[10px] text-[#b7c4cc]">verified sighting</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#a48a55]" />
+            <span className="text-[10px] text-[#d8b877]">unvalidated detection</span>
+          </div>
+        </div>
+      )}
+
+      {/* ================= RIGHT PANEL — one grouped action stack ================= */}
+      <div className="absolute top-[70px] right-4 w-48 flex flex-col gap-2 pointer-events-auto">
+        <button
+          onClick={handleDiscoverySnapshot}
+          className="bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20"
+        >
+          Snapshot
+        </button>
+        <button
+          onClick={handleExportReport}
+          disabled={exportingReport}
+          className="bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+        >
+          {exportingReport && <span className="w-1.5 h-1.5 rounded-full bg-[#8fa3ad] animate-pulse" />}
+          {exportingReport ? "Generating…" : "Export field report"}
+        </button>
+        <button
+          onClick={handleEmailReport}
+          disabled={emailingReport}
+          className="bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+        >
+          {emailingReport && <span className="w-1.5 h-1.5 rounded-full bg-[#8fa3ad] animate-pulse" />}
+          {emailingReport ? "Sending…" : "Email report"}
+        </button>
+        {!isMapMode && (
+          <button
+            onClick={handleOpenLibrary}
+            className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left text-[#b7c4cc] hover:bg-white/[0.08]"
           >
-            <input
-              type="text"
-              value={speciesQuery}
-              onChange={(e) => setSpeciesQuery(e.target.value)}
-              placeholder="Scientific name (e.g. Acropora cervicornis)"
-              className="backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-lg px-3 py-1 text-xs text-cyan-200 placeholder:text-cyan-200/40 outline-none focus:border-cyan-400/70 w-64"
-            />
-            <button
-              type="submit"
-              className="backdrop-blur-md bg-cyan-400/10 border border-cyan-400/30 rounded-lg px-3 py-1 text-xs uppercase tracking-widest hover:bg-cyan-400/20"
-            >
-              Plot
-            </button>
-          </form>
+            Clip library
+          </button>
         )}
 
-        {/* Video source controls — only relevant in ROV Feed mode */}
-        {!isMapMode && (
-          <div className="absolute bottom-20 left-4 pointer-events-auto flex flex-col gap-2">
-            <div className="flex gap-2">
+        {activeToast && (
+          <div
+            className={`rounded-lg px-3 py-2 text-[11px] border ${
+              activeToast.type === "success"
+                ? "bg-[#8fa3ad]/10 border-[#8fa3ad]/50 text-[#b7c4cc]"
+                : activeToast.type === "error"
+                ? "bg-[#c47a6e]/10 border-[#c47a6e]/50 text-[#d99a8f]"
+                : "bg-white/[0.04] border-[#3a444a] text-[#d3dbe0]"
+            }`}
+          >
+            {activeToast.text}
+          </div>
+        )}
+      </div>
+
+      {!isMapMode && alert && (
+        <div className="absolute bottom-20 right-4 bg-[#a48a55]/10 border border-[#b38d47] text-[#d8b877] rounded-xl px-4 py-2 text-xs">
+          Possible bleaching — unverified
+        </div>
+      )}
+
+      {!isMapMode && (
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-16 h-16 border border-[#8fa3ad]/60 rounded-full animate-pulse pointer-events-none" />
+      )}
+
+      {/* ================= BOTTOM BAR — video source controls, one row ================= */}
+      {!isMapMode && (
+        <div className="absolute bottom-0 left-0 right-0 bg-[#1c2226]/90 border-t border-[#3a444a] px-4 py-3 pointer-events-auto">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={handleUseDefaultClip}
+              className={`border rounded-lg px-3 py-1.5 text-[10px] uppercase tracking-widest ${
+                videoSourceMode === "default"
+                  ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
+                  : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
+              }`}
+            >
+              Default clip
+            </button>
+            <button
+              onClick={handleUploadClick}
+              className={`border rounded-lg px-3 py-1.5 text-[10px] uppercase tracking-widest ${
+                videoSourceMode === "upload"
+                  ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
+                  : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
+              }`}
+            >
+              Upload video
+            </button>
+            <button
+              onClick={handleUseWebcam}
+              className={`border rounded-lg px-3 py-1.5 text-[10px] uppercase tracking-widest ${
+                videoSourceMode === "webcam"
+                  ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
+                  : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
+              }`}
+            >
+              Use webcam
+            </button>
+
+            <form onSubmit={handleUseVideoUrl} className="flex gap-2 ml-1">
+              <input
+                type="text"
+                value={videoUrlInput}
+                onChange={(e) => setVideoUrlInput(e.target.value)}
+                placeholder="Paste a direct .mp4 video URL…"
+                className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-2 py-1.5 text-[10px] placeholder:text-[#5a6a72] outline-none focus:border-[#8fa3ad] w-56"
+              />
               <button
-                onClick={handleUseDefaultClip}
-                className={`backdrop-blur-md border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest ${
-                  videoSourceMode === "default"
-                    ? "bg-cyan-400/20 border-cyan-400/60"
-                    : "bg-white/5 border-cyan-400/30 hover:bg-white/10"
+                type="submit"
+                className={`border rounded-lg px-3 py-1.5 text-[10px] uppercase tracking-widest ${
+                  videoSourceMode === "url"
+                    ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
+                    : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
                 }`}
               >
-                Default Clip
+                Load URL
               </button>
-              <button
-                onClick={handleUploadClick}
-                className={`backdrop-blur-md border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest ${
-                  videoSourceMode === "upload"
-                    ? "bg-cyan-400/20 border-cyan-400/60"
-                    : "bg-white/5 border-cyan-400/30 hover:bg-white/10"
-                }`}
-              >
-                Upload Video
-              </button>
-              <button
-                onClick={handleUseWebcam}
-                className={`backdrop-blur-md border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest ${
-                  videoSourceMode === "webcam"
-                    ? "bg-cyan-400/20 border-cyan-400/60"
-                    : "bg-white/5 border-cyan-400/30 hover:bg-white/10"
-                }`}
-              >
-                Use Webcam
-              </button>
-              <button
-                onClick={handleOpenLibrary}
-                className="backdrop-blur-md border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest bg-white/5 border-cyan-400/30 hover:bg-white/10"
-              >
-                📁 Clip Library
-              </button>
-            </div>
+            </form>
 
             {videoSourceMode === "upload" && uploadedFile && (
-              <div className="flex items-center gap-2 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-lg px-2 py-1">
-                <label className="flex items-center gap-1 text-[10px] text-cyan-200/80 cursor-pointer">
+              <div className="flex items-center gap-2 bg-white/[0.04] border border-[#3a444a] rounded-lg px-2 py-1.5 ml-1">
+                <label className="flex items-center gap-1 text-[10px] text-[#b7c4cc] cursor-pointer">
                   <input
                     type="checkbox"
                     checked={shareClip}
                     onChange={(e) => setShareClip(e.target.checked)}
-                    className="accent-cyan-400"
+                    className="accent-[#8fa3ad]"
                   />
                   Share with team
                 </label>
                 <button
                   onClick={handleSaveToLibrary}
                   disabled={savingClip}
-                  className="text-[10px] uppercase tracking-widest text-cyan-300 hover:text-cyan-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="text-[10px] uppercase tracking-widest text-[#8fa3ad] hover:text-[#d3dbe0] disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {savingClip ? "Saving…" : "Save to Library"}
+                  {savingClip ? "Saving…" : "Save to library"}
                 </button>
               </div>
             )}
 
             {clipSaveMessage && (
               <span
-                className={`text-[10px] rounded px-2 py-1 bg-black/40 ${
-                  clipSaveMessage.type === "success" ? "text-green-400" : "text-red-400"
+                className={`text-[10px] rounded px-2 py-1 ${
+                  clipSaveMessage.type === "success" ? "text-[#8fa3ad]" : "text-[#c47a6e]"
                 }`}
               >
                 {clipSaveMessage.text}
               </span>
             )}
-            <form onSubmit={handleUseVideoUrl} className="flex gap-2">
-              <input
-                type="text"
-                value={videoUrlInput}
-                onChange={(e) => setVideoUrlInput(e.target.value)}
-                placeholder="Paste a direct .mp4 video URL…"
-                className="backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-lg px-2 py-1 text-[10px] text-cyan-200 placeholder:text-cyan-200/40 outline-none focus:border-cyan-400/70 w-56"
-              />
-              <button
-                type="submit"
-                className={`backdrop-blur-md border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest ${
-                  videoSourceMode === "url"
-                    ? "bg-cyan-400/20 border-cyan-400/60"
-                    : "bg-white/5 border-cyan-400/30 hover:bg-white/10"
-                }`}
-              >
-                Load URL
-              </button>
-            </form>
+
             {(webcamError || (videoLoadError && videoSourceMode !== "url")) && (
-              <span className="text-[10px] text-red-400 bg-black/40 rounded px-2 py-1">
+              <span className="text-[10px] text-[#c47a6e]">
                 {webcamError ||
                   (videoSourceMode === "default"
                     ? "Default clip failed to load — check frontend/public/rov-feed.mp4 exists"
@@ -684,194 +736,86 @@ export default function MissionControl() {
               </span>
             )}
           </div>
-        )}
+        </div>
+      )}
 
-        {/* ================= RIGHT ACTION STACK =================
-            Previously Snapshot/Export/Email were three independently
-            positioned buttons (top-4 right-4 translate-y-32, top-4
-            right-56, top-4 right-[420px]). Only Snapshot had a vertical
-            offset — Export and Email sat at the SAME height as the top
-            bar (ROV Feed / Bathymetry Map toggle, Coordinates card),
-            which is exactly what collided in the screenshot. Grouped
-            into one vertical stack below the account row so nothing can
-            collide regardless of viewport width — no more magic-number
-            right offsets to keep in sync. */}
-        <div className="absolute top-4 right-4 translate-y-32 pointer-events-auto flex flex-col gap-2 w-52">
-          <button
-            onClick={handleDiscoverySnapshot}
-            className="backdrop-blur-md bg-cyan-400/10 border border-cyan-400/40 rounded-xl px-4 py-2 text-xs uppercase tracking-widest text-left hover:bg-cyan-400/20"
-          >
-            📸 Snapshot
-          </button>
-
-          <button
-            onClick={handleExportReport}
-            disabled={exportingReport}
-            className="backdrop-blur-md bg-cyan-400/10 border border-cyan-400/40 rounded-xl px-4 py-2 text-xs uppercase tracking-widest text-left hover:bg-cyan-400/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-          >
-            {exportingReport ? (
-              <>
-                <span className="w-2 h-2 rounded-full bg-cyan-300 animate-pulse" />
-                Generating…
-              </>
-            ) : (
-              <>Export Field Report</>
-            )}
-          </button>
-
-          <button
-            onClick={handleEmailReport}
-            disabled={emailingReport}
-            className="backdrop-blur-md bg-cyan-400/10 border border-cyan-400/40 rounded-xl px-4 py-2 text-xs uppercase tracking-widest text-left hover:bg-cyan-400/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-          >
-            {emailingReport ? (
-              <>
-                <span className="w-2 h-2 rounded-full bg-cyan-300 animate-pulse" />
-                Sending…
-              </>
-            ) : (
-              <>📧 Email Report</>
-            )}
-          </button>
-
-          {emailReportMessage && (
-            <div
-              className={`backdrop-blur-md border rounded-xl px-4 py-2 text-xs uppercase tracking-widest ${
-                emailReportMessage.type === "success"
-                  ? "bg-green-400/10 border-green-400/50 text-green-300"
-                  : "bg-red-500/10 border-red-400/50 text-red-300"
-              }`}
-            >
-              {emailReportMessage.text}
+      {libraryOpen && (
+        <div className="absolute inset-0 bg-black/70 pointer-events-auto flex items-center justify-center">
+          <div className="w-full max-w-md max-h-[70vh] flex flex-col bg-[#1c2226] border border-[#3a444a] rounded-xl overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-[#3a444a]">
+              <span className="text-xs uppercase tracking-widest text-[#8fa3ad]">Clip library</span>
+              <button
+                onClick={() => setLibraryOpen(false)}
+                className="text-[#8fa3ad] hover:text-[#d3dbe0] text-sm"
+              >
+                ✕
+              </button>
             </div>
-          )}
-        </div>
 
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-6 py-2 flex gap-6">
-          <span>
-            TEMP <span className="text-cyan-300">{telemetry.temp}</span>
-            {telemetry.tempSource === "live" && (
-              <span className="ml-1 text-[10px] text-green-400 align-super">LIVE</span>
-            )}
-          </span>
-          <span>
-            SALINITY <span className="text-cyan-300">{telemetry.salinity}</span>
-          </span>
-          <span>
-            HEADING <span className="text-cyan-300">{telemetry.heading}</span>
-          </span>
-          {!isMapMode && coralBleachingRatio !== null && (
-            <span>
-              CORAL{" "}
-              <span className={alert ? "text-red-400" : "text-cyan-300"}>
-                {(coralBleachingRatio * 100).toFixed(0)}% bleached
-              </span>
-            </span>
-          )}
-        </div>
+            <div className="flex gap-2 px-4 pt-3">
+              <button
+                onClick={() => handleSwitchLibraryScope("mine")}
+                className={`flex-1 rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest border ${
+                  libraryScope === "mine"
+                    ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
+                    : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
+                }`}
+              >
+                My clips
+              </button>
+              <button
+                onClick={() => handleSwitchLibraryScope("shared")}
+                className={`flex-1 rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest border ${
+                  libraryScope === "shared"
+                    ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
+                    : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
+                }`}
+              >
+                Team clips
+              </button>
+            </div>
 
-        {!isMapMode && (
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-16 h-16 border border-cyan-400/60 rounded-full animate-pulse" />
-        )}
-
-        {!isMapMode && alert && (
-          <div className="absolute bottom-4 right-4 backdrop-blur-md bg-red-500/10 border border-red-400/50 text-red-300 rounded-xl px-4 py-2 animate-pulse">
-            ⚠ Coral Bleaching Detected
-          </div>
-        )}
-
-        {snapshotMessage && (
-          <div
-            className={`absolute top-1/2 left-1/2 -translate-x-1/2 translate-y-24 backdrop-blur-md border rounded-xl px-4 py-2 text-xs uppercase tracking-widest ${
-              snapshotMessage.type === "success"
-                ? "bg-green-400/10 border-green-400/50 text-green-300"
-                : snapshotMessage.type === "error"
-                ? "bg-red-500/10 border-red-400/50 text-red-300"
-                : "bg-white/5 border-cyan-400/30 text-cyan-200"
-            }`}
-          >
-            {snapshotMessage.text}
-          </div>
-        )}
-
-        {libraryOpen && (
-          <div className="absolute inset-0 bg-black/70 pointer-events-auto flex items-center justify-center">
-            <div className="w-full max-w-md max-h-[70vh] flex flex-col backdrop-blur-md bg-black/80 border border-cyan-400/40 rounded-xl overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-cyan-400/20">
-                <span className="text-xs uppercase tracking-widest text-cyan-400">Clip Library</span>
-                <button
-                  onClick={() => setLibraryOpen(false)}
-                  className="text-cyan-400/70 hover:text-cyan-200 text-sm"
-                >
-                  ✕
-                </button>
-              </div>
-
-              <div className="flex gap-2 px-4 pt-3">
-                <button
-                  onClick={() => handleSwitchLibraryScope("mine")}
-                  className={`flex-1 rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest border ${
-                    libraryScope === "mine"
-                      ? "bg-cyan-400/20 border-cyan-400/60"
-                      : "bg-white/5 border-cyan-400/30 hover:bg-white/10"
-                  }`}
-                >
-                  My Clips
-                </button>
-                <button
-                  onClick={() => handleSwitchLibraryScope("shared")}
-                  className={`flex-1 rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest border ${
-                    libraryScope === "shared"
-                      ? "bg-cyan-400/20 border-cyan-400/60"
-                      : "bg-white/5 border-cyan-400/30 hover:bg-white/10"
-                  }`}
-                >
-                  Team Clips
-                </button>
-              </div>
-
-              <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-2">
-                {libraryLoading && (
-                  <span className="text-[10px] text-cyan-200/60 uppercase tracking-widest">Loading…</span>
+            <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-2">
+              {libraryLoading && (
+                <span className="text-[10px] text-[#5a6a72] uppercase tracking-widest">Loading…</span>
+              )}
+              {!libraryLoading &&
+                (libraryScope === "mine" ? myClips : sharedClips).length === 0 && (
+                  <span className="text-[10px] text-[#5a6a72]">
+                    {libraryScope === "mine"
+                      ? "No saved clips yet — upload a video and hit \"Save to library.\""
+                      : "No shared clips yet."}
+                  </span>
                 )}
-                {!libraryLoading &&
-                  (libraryScope === "mine" ? myClips : sharedClips).length === 0 && (
-                    <span className="text-[10px] text-cyan-200/60">
-                      {libraryScope === "mine"
-                        ? "No saved clips yet — upload a video and hit \"Save to Library\"."
-                        : "No shared clips yet."}
-                    </span>
-                  )}
-                {(libraryScope === "mine" ? myClips : sharedClips).map((clip) => (
-                  <div
-                    key={clip.id}
-                    className="flex items-center gap-2 backdrop-blur-md bg-white/5 border border-cyan-400/20 hover:border-cyan-400/60 hover:bg-white/10 rounded-lg overflow-hidden"
+              {(libraryScope === "mine" ? myClips : sharedClips).map((clip) => (
+                <div
+                  key={clip.id}
+                  className="flex items-center gap-2 bg-white/[0.04] border border-[#3a444a] hover:border-[#8fa3ad]/60 hover:bg-white/[0.08] rounded-lg overflow-hidden"
+                >
+                  <button
+                    onClick={() => handleLoadClipFromLibrary(clip)}
+                    className="flex-1 text-left px-3 py-2"
                   >
+                    <p className="text-xs">{clip.name}</p>
+                    <p className="text-[10px] text-[#5a6a72]">
+                      {libraryScope === "shared" ? clip.owner_email : new Date(clip.created_at).toLocaleDateString()}
+                    </p>
+                  </button>
+                  {clip.owner_email === session?.user?.email && (
                     <button
-                      onClick={() => handleLoadClipFromLibrary(clip)}
-                      className="flex-1 text-left px-3 py-2"
+                      onClick={(e) => handleDeleteClip(clip, e)}
+                      title="Delete clip"
+                      className="px-3 py-2 text-[#c47a6e] hover:text-[#d99a8f] text-xs"
                     >
-                      <p className="text-xs text-cyan-200">{clip.name}</p>
-                      <p className="text-[10px] text-cyan-200/50">
-                        {libraryScope === "shared" ? clip.owner_email : new Date(clip.created_at).toLocaleDateString()}
-                      </p>
+                      🗑
                     </button>
-                    {clip.owner_email === session?.user?.email && (
-                      <button
-                        onClick={(e) => handleDeleteClip(clip, e)}
-                        title="Delete clip"
-                        className="px-3 py-2 text-red-400/70 hover:text-red-300 text-xs"
-                      >
-                        🗑
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
+                  )}
+                </div>
+              ))}
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       <div className="crt-scanlines absolute inset-0 pointer-events-none opacity-10" />
     </div>
