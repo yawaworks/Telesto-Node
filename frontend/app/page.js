@@ -686,54 +686,66 @@ export default function MissionControl() {
           </div>
         )}
 
-        <button
-          onClick={handleDiscoverySnapshot}
-          className="absolute top-4 right-4 translate-y-32 pointer-events-auto backdrop-blur-md bg-cyan-400/10 border border-cyan-400/40 rounded-xl px-4 py-2 text-xs uppercase tracking-widest hover:bg-cyan-400/20"
-        >
-          📸 Snapshot
-        </button>
-
-        <button
-          onClick={handleExportReport}
-          disabled={exportingReport}
-          className="absolute top-4 right-56 pointer-events-auto backdrop-blur-md bg-cyan-400/10 border border-cyan-400/40 rounded-xl px-4 py-2 text-xs uppercase tracking-widest hover:bg-cyan-400/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-        >
-          {exportingReport ? (
-            <>
-              <span className="w-2 h-2 rounded-full bg-cyan-300 animate-pulse" />
-              Generating…
-            </>
-          ) : (
-            <>Export Field Report</>
-          )}
-        </button>
-
-        <button
-          onClick={handleEmailReport}
-          disabled={emailingReport}
-          className="absolute top-4 right-[420px] pointer-events-auto backdrop-blur-md bg-cyan-400/10 border border-cyan-400/40 rounded-xl px-4 py-2 text-xs uppercase tracking-widest hover:bg-cyan-400/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-        >
-          {emailingReport ? (
-            <>
-              <span className="w-2 h-2 rounded-full bg-cyan-300 animate-pulse" />
-              Sending…
-            </>
-          ) : (
-            <>📧 Email Report</>
-          )}
-        </button>
-
-        {emailReportMessage && (
-          <div
-            className={`absolute top-16 right-4 backdrop-blur-md border rounded-xl px-4 py-2 text-xs uppercase tracking-widest ${
-              emailReportMessage.type === "success"
-                ? "bg-green-400/10 border-green-400/50 text-green-300"
-                : "bg-red-500/10 border-red-400/50 text-red-300"
-            }`}
+        {/* ================= RIGHT ACTION STACK =================
+            Previously Snapshot/Export/Email were three independently
+            positioned buttons (top-4 right-4 translate-y-32, top-4
+            right-56, top-4 right-[420px]). Only Snapshot had a vertical
+            offset — Export and Email sat at the SAME height as the top
+            bar (ROV Feed / Bathymetry Map toggle, Coordinates card),
+            which is exactly what collided in the screenshot. Grouped
+            into one vertical stack below the account row so nothing can
+            collide regardless of viewport width — no more magic-number
+            right offsets to keep in sync. */}
+        <div className="absolute top-4 right-4 translate-y-32 pointer-events-auto flex flex-col gap-2 w-52">
+          <button
+            onClick={handleDiscoverySnapshot}
+            className="backdrop-blur-md bg-cyan-400/10 border border-cyan-400/40 rounded-xl px-4 py-2 text-xs uppercase tracking-widest text-left hover:bg-cyan-400/20"
           >
-            {emailReportMessage.text}
-          </div>
-        )}
+            📸 Snapshot
+          </button>
+
+          <button
+            onClick={handleExportReport}
+            disabled={exportingReport}
+            className="backdrop-blur-md bg-cyan-400/10 border border-cyan-400/40 rounded-xl px-4 py-2 text-xs uppercase tracking-widest text-left hover:bg-cyan-400/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          >
+            {exportingReport ? (
+              <>
+                <span className="w-2 h-2 rounded-full bg-cyan-300 animate-pulse" />
+                Generating…
+              </>
+            ) : (
+              <>Export Field Report</>
+            )}
+          </button>
+
+          <button
+            onClick={handleEmailReport}
+            disabled={emailingReport}
+            className="backdrop-blur-md bg-cyan-400/10 border border-cyan-400/40 rounded-xl px-4 py-2 text-xs uppercase tracking-widest text-left hover:bg-cyan-400/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          >
+            {emailingReport ? (
+              <>
+                <span className="w-2 h-2 rounded-full bg-cyan-300 animate-pulse" />
+                Sending…
+              </>
+            ) : (
+              <>📧 Email Report</>
+            )}
+          </button>
+
+          {emailReportMessage && (
+            <div
+              className={`backdrop-blur-md border rounded-xl px-4 py-2 text-xs uppercase tracking-widest ${
+                emailReportMessage.type === "success"
+                  ? "bg-green-400/10 border-green-400/50 text-green-300"
+                  : "bg-red-500/10 border-red-400/50 text-red-300"
+              }`}
+            >
+              {emailReportMessage.text}
+            </div>
+          )}
+        </div>
 
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-6 py-2 flex gap-6">
           <span>
