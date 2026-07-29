@@ -14,6 +14,12 @@ const RIGHT_PANEL_WIDTH = 200;
 const LABEL_HEIGHT = 16;
 const TAG_HEIGHT = 13;
 
+// Tooltip is w-64 (256px) — used to clamp its center position so it can
+// never render partially off-screen or under the side chrome panels.
+const TOOLTIP_WIDTH = 256;
+const TOOLTIP_HALF_WIDTH = TOOLTIP_WIDTH / 2;
+const TOOLTIP_EDGE_PADDING = 8;
+
 const HOVER_DEBOUNCE_MS = 300;
 
 /**
@@ -21,6 +27,11 @@ const HOVER_DEBOUNCE_MS = 300;
  * given <video> element, and shows an AI-generated species detail tooltip
  * on hover. Boxes are in the original frame's pixel space (from the
  * backend), so we scale them to the video's displayed size.
+ *
+ * Hovering a box also pauses the underlying <video> so the animal stays
+ * framed inside its bounding box while you read the tooltip, instead of
+ * swimming out of frame mid-read. Playback resumes automatically once the
+ * mouse leaves the box (or the canvas entirely).
  */
 export default function DetectionOverlay({ videoRef, boxes }) {
   const canvasRef = useRef(null);
@@ -121,6 +132,15 @@ export default function DetectionOverlay({ videoRef, boxes }) {
     return () => resizeObserver.disconnect();
   }, [videoRef, boxes]);
 
+  // Safety net: if this component unmounts (e.g. switching to Bathymetry
+  // Map view) while the video is paused for a hover, make sure it resumes
+  // rather than silently staying frozen when the researcher switches back.
+  useEffect(() => {
+    return () => {
+      videoRef.current?.play().catch(() => {});
+    };
+  }, [videoRef]);
+
   const fetchSpeciesInfo = useCallback((label) => {
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
@@ -180,14 +200,33 @@ export default function DetectionOverlay({ videoRef, boxes }) {
         setSpeciesData(null);
         setFetchError(null);
         if (debounceRef.current) clearTimeout(debounceRef.current);
+        // Resume playback — mouse is still over the canvas, just no
+        // longer over a box.
+        videoRef.current?.play().catch(() => {});
       }
       return;
     }
 
-    setTooltipPos({ x: hit.bx + hit.bw / 2, y: hit.by });
+    // Clamp the tooltip's horizontal center so the 256px-wide box can
+    // never render partially under the left/right chrome panels or off
+    // the edge of the viewport, regardless of where the hovered box sits.
+    let clampedX = hit.bx + hit.bw / 2;
+    clampedX = Math.max(TOOLTIP_HALF_WIDTH + LEFT_PANEL_WIDTH + TOOLTIP_EDGE_PADDING, clampedX);
+    clampedX = Math.min(
+      rect.width - TOOLTIP_HALF_WIDTH - RIGHT_PANEL_WIDTH - TOOLTIP_EDGE_PADDING,
+      clampedX
+    );
+    setTooltipPos({ x: clampedX, y: hit.by });
 
     if (hit.label !== hoveredLabel) {
       console.debug("[DetectionOverlay] hovering box:", hit.label, "at", { bx: hit.bx, by: hit.by });
+      // Only pause on the transition INTO a hover (hoveredLabel was null).
+      // Moving between two overlapping boxes shouldn't toggle play/pause —
+      // the video should just stay paused the whole time the mouse is
+      // over any box.
+      if (hoveredLabel === null) {
+        videoRef.current?.pause();
+      }
       setHoveredLabel(hit.label);
       if (debounceRef.current) clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(() => fetchSpeciesInfo(hit.label), HOVER_DEBOUNCE_MS);
@@ -195,6 +234,10 @@ export default function DetectionOverlay({ videoRef, boxes }) {
   }
 
   function handleMouseLeave() {
+    if (hoveredLabel !== null) {
+      // Mouse left the canvas entirely while a box was hovered — resume.
+      videoRef.current?.play().catch(() => {});
+    }
     setHoveredLabel(null);
     setSpeciesData(null);
     setFetchError(null);
