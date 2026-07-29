@@ -7,34 +7,34 @@ export const metadata = {
 function Section({ title, children }) {
   return (
     <div className="mb-6">
-      <h2 className="text-cyan-400 text-sm uppercase tracking-widest mb-2">{title}</h2>
-      <div className="text-cyan-100/90 text-sm leading-relaxed space-y-2">{children}</div>
+      <h2 className="text-[#8fa3ad] text-sm uppercase tracking-widest mb-2">{title}</h2>
+      <div className="text-[#d3dbe0]/90 text-sm leading-relaxed space-y-2">{children}</div>
     </div>
   );
 }
 
 export default function TermsOfService() {
   return (
-    <div className="min-h-screen bg-black text-cyan-200 font-mono px-6 py-12">
+    <div className="min-h-screen bg-[#171d20] text-[#d3dbe0] font-mono px-6 py-12">
       <div className="max-w-2xl mx-auto">
         <Link
           href="/login"
-          className="text-xs text-cyan-400/70 hover:text-cyan-300 mb-8 inline-block"
+          className="text-xs text-[#8fa3ad] hover:text-[#d3dbe0] mb-8 inline-block"
         >
-          ← Back to Sign In
+          ← Back to sign in
         </Link>
 
-        <h1 className="text-2xl font-bold mb-1">Terms of Service</h1>
-        <p className="text-xs text-cyan-400/60 mb-8">Last updated: July 2026</p>
+        <h1 className="text-2xl font-bold mb-1 text-[#d3dbe0]">Terms of Service</h1>
+        <p className="text-xs text-[#5a6a72] mb-8">Last updated: July 2026</p>
 
-        <Section title="1. Acceptance of Terms">
+        <Section title="1. Acceptance of terms">
           <p>
             By creating an account or otherwise using Telesto Node ("the Service"), you agree
             to these Terms of Service. If you do not agree, please do not use the Service.
           </p>
         </Section>
 
-        <Section title="2. Description of Service">
+        <Section title="2. Description of service">
           <p>
             Telesto Node is a real-time marine ecosystem monitoring and analytics tool. It
             provides computer-vision species detection, coral bleaching analysis, 3D bathymetry
@@ -45,7 +45,7 @@ export default function TermsOfService() {
           </p>
         </Section>
 
-        <Section title="3. Research & Educational Use Only">
+        <Section title="3. Research and educational use only">
           <p>
             The Service is intended for research, educational, and demonstration purposes.
             Detections, species identifications, coral health scores, and telemetry readings
@@ -64,7 +64,7 @@ export default function TermsOfService() {
           </p>
         </Section>
 
-        <Section title="5. Your Content">
+        <Section title="5. Your content">
           <p>
             Video footage you upload, stream from a webcam, or link via URL is processed to
             generate detections and reports. Uploaded and webcam footage is processed in your
@@ -76,7 +76,7 @@ export default function TermsOfService() {
           </p>
         </Section>
 
-        <Section title="6. Third-Party Services">
+        <Section title="6. Third-party services">
           <p>
             The Service relies on several third-party providers, each governed by their own
             terms: Google (authentication), Roboflow (hosted computer vision inference), MongoDB
@@ -86,7 +86,7 @@ export default function TermsOfService() {
           </p>
         </Section>
 
-        <Section title="7. Acceptable Use">
+        <Section title="7. Acceptable use">
           <p>You agree not to use the Service to:</p>
           <ul className="list-disc list-inside space-y-1">
             <li>Upload or stream unlawful, harmful, or infringing content</li>
@@ -99,7 +99,7 @@ export default function TermsOfService() {
           </ul>
         </Section>
 
-        <Section title="8. No Warranty">
+        <Section title="8. No warranty">
           <p>
             The Service is provided "as is" without warranties of any kind, express or implied,
             including accuracy, reliability, or fitness for a particular purpose. Simulated
@@ -108,7 +108,7 @@ export default function TermsOfService() {
           </p>
         </Section>
 
-        <Section title="9. Limitation of Liability">
+        <Section title="9. Limitation of liability">
           <p>
             To the fullest extent permitted by law, Telesto Node and its creators shall not be
             liable for any indirect, incidental, or consequential damages arising from your use
@@ -116,7 +116,7 @@ export default function TermsOfService() {
           </p>
         </Section>
 
-        <Section title="10. Changes to These Terms">
+        <Section title="10. Changes to these terms">
           <p>
             These Terms may be updated from time to time. Continued use of the Service after
             changes are posted constitutes acceptance of the revised Terms.
