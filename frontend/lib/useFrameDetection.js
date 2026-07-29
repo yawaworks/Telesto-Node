@@ -8,10 +8,14 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5
 const CAPTURE_INTERVAL_MS = 2500;
 const CONF_THRESHOLD = 0.2;
 
-const HOLD_FRAMES = 3;
 const MIN_CONSECUTIVE_HITS = 1;
 const HISTORY_LENGTH = 3;
 const MATCH_DISTANCE_PX = 250;
+
+// How long a species stays hoverable as a faint "ghost" box after it
+// actually leaves frame. After this, the box is gone completely — nothing
+// left to rewind to until it's detected again for real.
+const GHOST_EXPIRY_MS = 3000;
 
 function centerOf(box) {
   return [(box.x1 + box.x2) / 2, (box.y1 + box.y2) / 2];
@@ -29,9 +33,16 @@ function distance(a, b) {
  *   only the latest value at capture time is sent along with the frame,
  *   as query params, so the backend can attach real coordinates to any
  *   n8n detection alert it fires.
+ *
+ * Returns both `boxes` (species actually visible in the current frame)
+ * and `ghostBoxes` (species seen within the last GHOST_EXPIRY_MS but not
+ * currently in frame — last known position + the exact video.currentTime
+ * they were last seen at, so a hover can seek the video back to that
+ * moment). DetectionOverlay is responsible for rendering/hovering both.
  */
 export function useFrameDetection(videoRef, { enabled = true, telemetry } = {}) {
   const [boxes, setBoxes] = useState([]);
+  const [ghostBoxes, setGhostBoxes] = useState([]);
   const [classifications, setClassifications] = useState([]);
   const [coralBleachingRatio, setCoralBleachingRatio] = useState(null);
   const [status, setStatus] = useState("idle");
@@ -39,8 +50,14 @@ export function useFrameDetection(videoRef, { enabled = true, telemetry } = {}) 
   const inFlightRef = useRef(false);
 
   const historyRef = useRef([]);
-  const lastGoodBoxesRef = useRef([]);
-  const missedFramesRef = useRef(0);
+
+  // label -> { box: {x1,y1,x2,y2}, videoTime: number, lastSeenAt: number }
+  // videoTime is video.currentTime at the moment it was last actually
+  // detected — that's the timestamp a hover-rewind seeks back to.
+  // lastSeenAt is wall-clock Date.now(), used for the 3s ghost expiry
+  // (real elapsed time, not video time — a paused/rewound video shouldn't
+  // extend a ghost's life just because video time isn't advancing).
+  const recentDetectionsRef = useRef(new Map());
 
   const telemetryRef = useRef(telemetry);
   useEffect(() => {
@@ -48,7 +65,14 @@ export function useFrameDetection(videoRef, { enabled = true, telemetry } = {}) 
   }, [telemetry]);
 
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled) {
+      // Video source may change while disabled (switching clips) — old
+      // timestamps from a previous source would be meaningless to seek
+      // to, so clear the slate whenever detection is turned off.
+      recentDetectionsRef.current.clear();
+      setGhostBoxes([]);
+      return;
+    }
 
     if (!canvasRef.current) {
       canvasRef.current = document.createElement("canvas");
@@ -75,6 +99,42 @@ export function useFrameDetection(videoRef, { enabled = true, telemetry } = {}) 
         }
         return hits >= MIN_CONSECUTIVE_HITS;
       });
+    }
+
+    // Updates the last-seen map from this frame's real detections, then
+    // builds the ghost list from whatever's left in the map that (a)
+    // wasn't just seen and (b) hasn't expired yet. Expired entries are
+    // dropped from the map here too, so it never grows unbounded.
+    function updateGhosts(smoothedBoxes, video) {
+      const now = Date.now();
+      const seenLabels = new Set(smoothedBoxes.map((b) => b.label));
+
+      for (const box of smoothedBoxes) {
+        recentDetectionsRef.current.set(box.label, {
+          box: { x1: box.x1, y1: box.y1, x2: box.x2, y2: box.y2 },
+          videoTime: video.currentTime,
+          lastSeenAt: now,
+        });
+      }
+
+      const ghosts = [];
+      for (const [label, entry] of recentDetectionsRef.current.entries()) {
+        if (seenLabels.has(label)) continue; // currently visible, not a ghost
+        if (now - entry.lastSeenAt >= GHOST_EXPIRY_MS) {
+          recentDetectionsRef.current.delete(label);
+          continue;
+        }
+        ghosts.push({
+          label,
+          x1: entry.box.x1,
+          y1: entry.box.y1,
+          x2: entry.box.x2,
+          y2: entry.box.y2,
+          videoTime: entry.videoTime,
+          ghost: true,
+        });
+      }
+      setGhostBoxes(ghosts);
     }
 
     async function captureAndSend() {
@@ -122,18 +182,12 @@ export function useFrameDetection(videoRef, { enabled = true, telemetry } = {}) 
         const rawBoxes = data.boxes || [];
         const smoothed = computeSmoothedBoxes(rawBoxes);
 
-        if (smoothed.length > 0) {
-          lastGoodBoxesRef.current = smoothed;
-          missedFramesRef.current = 0;
-          setBoxes(smoothed);
-        } else if (rawBoxes.length === 0 && missedFramesRef.current < HOLD_FRAMES) {
-          missedFramesRef.current += 1;
-          setBoxes(lastGoodBoxesRef.current);
-        } else {
-          missedFramesRef.current += 1;
-          lastGoodBoxesRef.current = [];
-          setBoxes([]);
-        }
+        // Boxes now ONLY reflect what's actually detected this frame —
+        // no artificial hold-over for missed frames. A species not
+        // currently in view has no solid box; it only lives on as a
+        // ghost (see updateGhosts) until GHOST_EXPIRY_MS passes.
+        setBoxes(smoothed);
+        updateGhosts(smoothed, video);
 
         setClassifications(data.classifications || []);
         setCoralBleachingRatio(
@@ -158,5 +212,5 @@ export function useFrameDetection(videoRef, { enabled = true, telemetry } = {}) 
     };
   }, [videoRef, enabled]);
 
-  return { boxes, classifications, coralBleachingRatio, status };
+  return { boxes, ghostBoxes, classifications, coralBleachingRatio, status };
 }
