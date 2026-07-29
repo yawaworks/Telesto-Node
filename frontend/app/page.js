@@ -19,6 +19,10 @@ const DEFAULT_SPECIES = "Acropora cervicornis";
 const DEFAULT_VIDEO_SRC =
   process.env.NEXT_PUBLIC_DEFAULT_VIDEO_URL ||
   "https://res.cloudinary.com/YOUR_CLOUD_NAME/video/upload/rov-feed.mp4";
+// n8n "Mission Report Email" workflow's production webhook URL.
+const N8N_MISSION_REPORT_WEBHOOK_URL =
+  process.env.NEXT_PUBLIC_N8N_MISSION_REPORT_WEBHOOK_URL ||
+  "https://yawaworks.app.n8n.cloud/webhook/email-mission-report";
 
 export default function MissionControl() {
   const { data: session, status: sessionStatus } = useSession();
@@ -49,6 +53,8 @@ export default function MissionControl() {
   const [speciesQuery, setSpeciesQuery] = useState(DEFAULT_SPECIES);
   const [viewMode, setViewMode] = useState("video");
   const [exportingReport, setExportingReport] = useState(false);
+  const [emailingReport, setEmailingReport] = useState(false);
+  const [emailReportMessage, setEmailReportMessage] = useState(null);
   const [snapshotMessage, setSnapshotMessage] = useState(null);
   // Populated further down (handleDiscoverySnapshot is defined after the
   // video-source handlers). Declared here, before the gamepad-init effect
@@ -382,6 +388,35 @@ export default function MissionControl() {
     }
   }
 
+  // Fires the n8n "Mission Report Email" workflow: it fetches the same
+  // /export-report PDF server-side and emails it as an attachment to the
+  // logged-in researcher, so they don't have to download-then-forward it
+  // manually. Sends to session.user.email rather than a typed-in address —
+  // simplest safe default, no risk of mis-sending a mission report.
+  async function handleEmailReport() {
+    const recipientEmail = session?.user?.email;
+    if (!recipientEmail) return;
+
+    setEmailingReport(true);
+    setEmailReportMessage(null);
+    try {
+      const response = await fetch(N8N_MISSION_REPORT_WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...telemetry, recipient_email: recipientEmail }),
+      });
+      if (!response.ok) throw new Error(`Email report failed: ${response.status}`);
+
+      setEmailReportMessage({ type: "success", text: `Report sent to ${recipientEmail}` });
+    } catch (err) {
+      console.error("Email report failed:", err);
+      setEmailReportMessage({ type: "error", text: "Couldn't send report — check connection and try again" });
+    } finally {
+      setEmailingReport(false);
+      setTimeout(() => setEmailReportMessage(null), 4000);
+    }
+  }
+
   const isMapMode = viewMode === "map";
 
   if (sessionStatus === "unauthenticated") {
@@ -668,6 +703,33 @@ export default function MissionControl() {
             <>Export Field Report</>
           )}
         </button>
+
+        <button
+          onClick={handleEmailReport}
+          disabled={emailingReport}
+          className="absolute top-4 right-[420px] pointer-events-auto backdrop-blur-md bg-cyan-400/10 border border-cyan-400/40 rounded-xl px-4 py-2 text-xs uppercase tracking-widest hover:bg-cyan-400/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+        >
+          {emailingReport ? (
+            <>
+              <span className="w-2 h-2 rounded-full bg-cyan-300 animate-pulse" />
+              Sending…
+            </>
+          ) : (
+            <>Email Report</>
+          )}
+        </button>
+
+        {emailReportMessage && (
+          <div
+            className={`absolute top-16 right-4 backdrop-blur-md border rounded-xl px-4 py-2 text-xs uppercase tracking-widest ${
+              emailReportMessage.type === "success"
+                ? "bg-green-400/10 border-green-400/50 text-green-300"
+                : "bg-red-500/10 border-red-400/50 text-red-300"
+            }`}
+          >
+            {emailReportMessage.text}
+          </div>
+        )}
 
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 backdrop-blur-md bg-white/5 border border-cyan-400/30 rounded-xl px-6 py-2 flex gap-6">
           <span>

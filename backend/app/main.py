@@ -1,4 +1,5 @@
 import math
+import re
 from typing import List, Optional
 
 from dotenv import load_dotenv
@@ -497,15 +498,63 @@ async def proxy_video(request: Request, url: str):
 @app.get("/species-data")
 @limiter.limit("30/minute")
 async def species_data(request: Request, scientific_name: str, max_records: int = 200):
+    """Serves species location data as GeoJSON for the bathymetry map.
+
+    Checks the species_cache Mongo collection first (populated every 6
+    hours by the n8n "Species Data Sync" workflow) — a cache hit avoids
+    hitting OBIS live and returns near-instantly. Falls back to a live
+    OBIS fetch on a cache miss, since the sync workflow currently only
+    keeps one species (Acropora cervicornis) fresh; a researcher
+    searching any other species should still get real results, just
+    without the speed benefit until that species is added to the sync.
+    """
+    db = get_db()
+    features = []
+
+    if db is not None:
+        cached_docs = list(
+            db["species_cache"]
+            .find(
+                {
+                    "scientific_name": {
+                        "$regex": f"^{re.escape(scientific_name)}$",
+                        "$options": "i",
+                    }
+                }
+            )
+            .limit(max_records)
+        )
+        for doc in cached_docs:
+            lat = _clean(doc.get("latitude"))
+            lng = _clean(doc.get("longitude"))
+            if lat is None or lng is None:
+                continue
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [lng, lat]},
+                    "properties": {
+                        "scientificName": doc.get("scientific_name"),
+                        "depth_meters": _clean(doc.get("depth_meters")),
+                        "country": doc.get("country"),
+                        "source": doc.get("source"),
+                    },
+                }
+            )
+
+    if features:
+        return {"type": "FeatureCollection", "features": features, "cached": True}
+
+    # Cache miss — fall back to a live OBIS lookup rather than returning
+    # nothing just because this species hasn't been synced yet.
     df = fetch_obis_species_data(scientific_name, max_records=max_records)
 
     if df is None or df.empty:
         raise HTTPException(
             status_code=404,
-            detail=f"No OBIS records found for '{scientific_name}'",
+            detail=f"No records found for '{scientific_name}' (not cached, and no live OBIS results)",
         )
 
-    features = []
     for _, row in df.iterrows():
         lat = _clean(row["latitude"])
         lng = _clean(row["longitude"])
@@ -524,7 +573,7 @@ async def species_data(request: Request, scientific_name: str, max_records: int 
             }
         )
 
-    return {"type": "FeatureCollection", "features": features}
+    return {"type": "FeatureCollection", "features": features, "cached": False}
 
 
 @app.post("/internal/species-sync")
