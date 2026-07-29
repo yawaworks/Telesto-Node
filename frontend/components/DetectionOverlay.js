@@ -48,6 +48,10 @@ const HIDE_DELAY_MS = 250;
  * doesn't swim off (or, for a ghost, immediately vanish again) while
  * you're reading the tooltip. Playback resumes once you actually stop
  * hovering both the box and the tooltip itself.
+ *
+ * The tooltip also shows related research papers (from OpenAlex, via the
+ * same /species-info backend call) when the backend finds any — see the
+ * "Related research" section below the Wikipedia/OBIS info.
  */
 export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
   const canvasRef = useRef(null);
@@ -201,8 +205,9 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
   // Recomputes the tooltip's actual on-screen position against its real
   // measured height (not a guess). Flips to below the box if there isn't
   // room above it to clear the top chrome bar, and clamps against the
-  // bottom of the viewport too — long species descriptions can no longer
-  // render partially off-screen in either direction.
+  // bottom of the viewport too — long species descriptions (now including
+  // the research papers section) can no longer render partially
+  // off-screen in either direction.
   const positionTooltip = useCallback(() => {
     if (!tooltipRef.current) return;
     const { x, boxTop, boxBottom } = anchorRef.current;
@@ -219,7 +224,8 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
   }, []);
 
   // Re-measure whenever the tooltip's content shape changes (loading →
-  // loaded → error all change its height), not just on first appearance.
+  // loaded → error all change its height — and now research_papers
+  // arriving can meaningfully grow it), not just on first appearance.
   useLayoutEffect(() => {
     if (hoveredLabel) positionTooltip();
   }, [hoveredLabel, speciesData, loading, fetchError, positionTooltip]);
@@ -385,7 +391,7 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
           ref={tooltipRef}
           onMouseEnter={handleTooltipMouseEnter}
           onMouseLeave={handleTooltipMouseLeave}
-          className="absolute z-20 w-64 -translate-x-1/2 bg-[#1c2226] border border-[#3a444a] rounded-lg px-3 py-2.5 font-mono text-xs"
+          className="absolute z-20 w-64 -translate-x-1/2 bg-[#1c2226] border border-[#3a444a] rounded-lg px-3 py-2.5 font-mono text-xs max-h-[70vh] overflow-y-auto"
           style={{
             left: tooltipStyle.left,
             top: tooltipStyle.top,
@@ -432,6 +438,34 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
                   </>
                 )}
               </p>
+
+              {speciesData.research_papers && speciesData.research_papers.length > 0 && (
+                <div className="pt-1.5 border-t border-[#3a444a] mt-1.5">
+                  <p className="text-[#8fa3ad] mb-1">Related research</p>
+                  <div className="space-y-1.5">
+                    {speciesData.research_papers.map((paper, i) => (
+                      <p key={i} className="leading-snug">
+                        {paper.url ? (
+                          <a
+                            href={paper.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="underline hover:text-[#8fa3ad]"
+                          >
+                            {paper.title}
+                          </a>
+                        ) : (
+                          paper.title
+                        )}
+                        {paper.year && <span className="text-[#5a6a72]"> ({paper.year})</span>}
+                        {paper.authors && (
+                          <span className="block text-[10px] text-[#5a6a72]">{paper.authors}</span>
+                        )}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
