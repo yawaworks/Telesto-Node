@@ -1,6 +1,15 @@
 import time
 import httpx
 
+# Wikimedia's API etiquette policy requires a descriptive User-Agent
+# identifying the application and a contact method — requests without one
+# can be throttled or rejected outright. This was the actual cause of
+# "no information found" showing up even for real, well-documented species.
+REQUEST_HEADERS = {
+    "User-Agent": "TelestoNode/1.0 (marine ecosystem monitoring research tool; "
+                  "contact: yashikayapsandworks@gmail.com)"
+}
+
 # In-process cache keyed by species label. Resets on redeploy/restart —
 # fine here since both upstream sources are free and fast; this just
 # avoids redundant round-trips while the process is warm.
@@ -23,7 +32,8 @@ def _split_label(species_name: str):
 async def _fetch_wikipedia_summary(client: httpx.AsyncClient, title: str):
     try:
         resp = await client.get(
-            f"https://en.wikipedia.org/api/rest_v1/page/summary/{title.replace(' ', '_')}"
+            f"https://en.wikipedia.org/api/rest_v1/page/summary/{title.replace(' ', '_')}",
+            headers=REQUEST_HEADERS,
         )
         if resp.status_code == 200:
             payload = resp.json()
@@ -45,13 +55,16 @@ async def get_species_info(species_name: str) -> dict:
 
     common_name, scientific_name = _split_label(species_name)
     data = {"query": species_name}
+    debug_attempts = []
 
     async with httpx.AsyncClient(timeout=8.0) as client:
         # Try the scientific name first (more likely to be an exact,
         # unambiguous Wikipedia title), then fall back to the common name.
         wiki = await _fetch_wikipedia_summary(client, scientific_name)
+        debug_attempts.append(f"wikipedia:{scientific_name} -> {'hit' if wiki else 'miss'}")
         if wiki is None and common_name != scientific_name:
             wiki = await _fetch_wikipedia_summary(client, common_name)
+            debug_attempts.append(f"wikipedia:{common_name} -> {'hit' if wiki else 'miss'}")
 
         if wiki:
             data["common_name"] = wiki.get("title")
@@ -69,19 +82,24 @@ async def get_species_info(species_name: str) -> dict:
             obis_resp = await client.get(
                 "https://api.obis.org/v3/taxon/complete",
                 params={"scientificname": scientific_name},
+                headers=REQUEST_HEADERS,
             )
             if obis_resp.status_code == 200:
                 results = obis_resp.json().get("results", [])
+                debug_attempts.append(f"obis:{scientific_name} -> {len(results)} results")
                 if results:
                     match = results[0]
                     data["scientific_name"] = match.get("scientificName")
                     data["taxon_rank"] = match.get("taxonRank")
                     data["kingdom"] = match.get("kingdom")
-        except httpx.HTTPError:
-            pass
+            else:
+                debug_attempts.append(f"obis:{scientific_name} -> HTTP {obis_resp.status_code}")
+        except httpx.HTTPError as e:
+            debug_attempts.append(f"obis:{scientific_name} -> error {e}")
 
     if len(data) <= 1:
         data["error"] = "No information found for this species"
+        data["_debug"] = debug_attempts  # remove once this is confirmed working end-to-end
 
     data["_source"] = "wikipedia_obis"
     _cache[species_name] = {"data": data, "cached_at": time.time()}
