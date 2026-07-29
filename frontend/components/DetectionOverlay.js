@@ -130,6 +130,8 @@ export default function DetectionOverlay({ videoRef, boxes }) {
     setFetchError(null);
     setSpeciesData(null);
 
+    console.debug("[DetectionOverlay] fetching species info for:", label);
+
     fetch(`${API_BASE_URL}/species-info?name=${encodeURIComponent(label)}`, {
       signal: controller.signal,
     })
@@ -137,7 +139,10 @@ export default function DetectionOverlay({ videoRef, boxes }) {
         if (!res.ok) throw new Error(`Lookup failed: ${res.status}`);
         return res.json();
       })
-      .then((data) => setSpeciesData(data))
+      .then((data) => {
+        console.debug("[DetectionOverlay] species info result:", data);
+        setSpeciesData(data);
+      })
       .catch((err) => {
         if (err.name !== "AbortError") {
           console.error("Species info lookup failed:", err);
@@ -154,12 +159,23 @@ export default function DetectionOverlay({ videoRef, boxes }) {
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
 
+    // A few px of forgiveness around each box — detection boxes are often
+    // a little offset from the actual animal, so requiring an exact
+    // pixel-perfect hover makes the feature feel broken even when it's
+    // working. Remove HIT_PADDING (or the console.debug lines) once
+    // you've confirmed hover detection is firing correctly.
+    const HIT_PADDING = 6;
     const hit = scaledBoxesRef.current.find(
-      (b) => mx >= b.bx && mx <= b.bx + b.bw && my >= b.by && my <= b.by + b.bh
+      (b) =>
+        mx >= b.bx - HIT_PADDING &&
+        mx <= b.bx + b.bw + HIT_PADDING &&
+        my >= b.by - HIT_PADDING &&
+        my <= b.by + b.bh + HIT_PADDING
     );
 
     if (!hit) {
       if (hoveredLabel !== null) {
+        console.debug("[DetectionOverlay] left box:", hoveredLabel);
         setHoveredLabel(null);
         setSpeciesData(null);
         setFetchError(null);
@@ -171,6 +187,7 @@ export default function DetectionOverlay({ videoRef, boxes }) {
     setTooltipPos({ x: hit.bx + hit.bw / 2, y: hit.by });
 
     if (hit.label !== hoveredLabel) {
+      console.debug("[DetectionOverlay] hovering box:", hit.label, "at", { bx: hit.bx, by: hit.by });
       setHoveredLabel(hit.label);
       if (debounceRef.current) clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(() => fetchSpeciesInfo(hit.label), HOVER_DEBOUNCE_MS);
