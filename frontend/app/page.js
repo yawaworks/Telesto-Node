@@ -13,13 +13,9 @@ import DetectionOverlay from "../components/DetectionOverlay";
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
 const BLEACHING_ALERT_THRESHOLD = 0.4;
 const DEFAULT_SPECIES = "Acropora cervicornis";
-// Hosted on Cloudinary instead of committed to the repo — a demo-length
-// video file is too large to check into GitHub sensibly, and this way it
-// can be swapped without a redeploy. Replace with your own upload's URL.
 const DEFAULT_VIDEO_SRC =
   process.env.NEXT_PUBLIC_DEFAULT_VIDEO_URL ||
-  "https://res.cloudinary.com/YOUR_CLOUD_NAME/videohttps://res.cloudinary.com/oimv0zhu/video/upload/v1785200530/12142670-hd_1920_1080_30fps_inpvjc.mp4/upload/rov-feed.mp4";
-// n8n "Mission Report Email" workflow's production webhook URL.
+  "https://res.cloudinary.com/oimv0zhu/video/upload/v1785200530/12142670-hd_1920_1080_30fps_inpvjc.mp4";
 const N8N_MISSION_REPORT_WEBHOOK_URL =
   process.env.NEXT_PUBLIC_N8N_MISSION_REPORT_WEBHOOK_URL ||
   "https://yawaworks.app.n8n.cloud/webhook/email-mission-report";
@@ -383,17 +379,22 @@ export default function MissionControl() {
 
   const isMapMode = viewMode === "map";
 
+  // Single slot for transient status messages (snapshot / email), so only
+  // one ever shows at a time instead of stacking in unrelated corners.
+  const activeToast = emailReportMessage || snapshotMessage;
+
   if (sessionStatus === "unauthenticated") {
     return null;
   }
 
   return (
-    <div className="relative w-full h-screen overflow-hidden bg-[#171d20] text-[#d3dbe0] font-mono">
+    <div className="relative w-full h-screen overflow-hidden bg-[#171d20] text-[#d3dbe0] font-mono text-sm">
       {sessionStatus === "loading" && (
-        <div className="absolute inset-0 z-50 bg-[#171d20] flex items-center justify-center text-sm text-[#d3dbe0]">
+        <div className="absolute inset-0 z-50 bg-[#171d20] flex items-center justify-center text-sm">
           Checking mission clearance…
         </div>
       )}
+
       <video
         ref={videoRef}
         id="feed"
@@ -440,31 +441,12 @@ export default function MissionControl() {
         }}
       />
 
-      <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute top-4 left-4 bg-white/[0.04] border border-[#3a444a] rounded-xl px-4 py-2">
-          <p className="text-[10px] uppercase tracking-widest text-[#a48a55]">Depth · simulated</p>
-          <p className="text-2xl font-bold text-[#d3dbe0]">{telemetry.depth}</p>
-        </div>
-
-        <div className="absolute top-4 right-4 bg-white/[0.04] border border-[#3a444a] rounded-xl px-4 py-2 text-right">
-          <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">Coordinates · measured</p>
-          <p className="text-sm text-[#d3dbe0]">{telemetry.coords}</p>
-        </div>
-
-        <div className="absolute top-4 right-4 translate-y-16 pointer-events-auto bg-white/[0.04] border border-[#3a444a] rounded-xl px-3 py-1 flex items-center gap-2 text-[10px]">
-          <span className="text-[#8fa3ad]">{session?.user?.email || session?.user?.name}</span>
-          <button
-            onClick={() => signOut({ callbackUrl: "/login" })}
-            className="uppercase tracking-widest text-[#c47a6e] hover:text-[#d99a8f]"
-          >
-            Sign out
-          </button>
-        </div>
-
-        <div className="absolute top-4 left-1/2 -translate-x-1/2 pointer-events-auto flex gap-2">
+      {/* ================= TOP BAR — mode toggle / status / account. Nothing else lives here. ================= */}
+      <div className="absolute top-0 left-0 right-0 h-14 flex items-center justify-between px-4 bg-[#1c2226]/90 border-b border-[#3a444a] pointer-events-auto">
+        <div className="flex gap-2">
           <button
             onClick={() => setViewMode("video")}
-            className={`border rounded-xl px-4 py-1 text-xs uppercase tracking-widest ${
+            className={`border rounded-lg px-3 py-1.5 text-xs uppercase tracking-widest ${
               !isMapMode
                 ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
                 : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
@@ -474,7 +456,7 @@ export default function MissionControl() {
           </button>
           <button
             onClick={() => setViewMode("map")}
-            className={`border rounded-xl px-4 py-1 text-xs uppercase tracking-widest ${
+            className={`border rounded-lg px-3 py-1.5 text-xs uppercase tracking-widest ${
               isMapMode
                 ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
                 : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
@@ -484,108 +466,231 @@ export default function MissionControl() {
           </button>
         </div>
 
-        {!isMapMode && (
-          <div className="absolute top-16 left-1/2 -translate-x-1/2 bg-white/[0.04] border border-[#3a444a] rounded-xl px-4 py-1 flex items-center gap-2">
-            <span
-              className={`w-2 h-2 rounded-full ${
-                videoLoadError
-                  ? "bg-[#c47a6e]"
+        <div className="flex items-center gap-2">
+          {!isMapMode ? (
+            <>
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  videoLoadError
+                    ? "bg-[#c47a6e]"
+                    : status === "live"
+                    ? "bg-[#8fa3ad] animate-pulse"
+                    : status === "error"
+                    ? "bg-[#c47a6e]"
+                    : "bg-[#a48a55] animate-pulse"
+                }`}
+              />
+              <span className="text-xs uppercase tracking-widest">
+                {videoLoadError
+                  ? "Feed error"
                   : status === "live"
-                  ? "bg-[#8fa3ad] animate-pulse"
+                  ? "Inference live"
                   : status === "error"
-                  ? "bg-[#c47a6e]"
-                  : "bg-[#a48a55] animate-pulse"
-              }`}
-            />
-            <span className="text-xs uppercase tracking-widest text-[#d3dbe0]">
-              {videoLoadError
-                ? "Feed error — check video source"
-                : status === "live"
-                ? "Inference live"
-                : status === "error"
-                ? "Inference error"
-                : "Connecting…"}
-            </span>
-          </div>
-        )}
+                  ? "Inference error"
+                  : "Connecting…"}
+              </span>
+            </>
+          ) : (
+            <span className="text-xs uppercase tracking-widest text-[#5a6a72]">Map mode</span>
+          )}
+        </div>
 
-        {isMapMode && (
-          <form
-            onSubmit={handleSpeciesSearch}
-            className="absolute top-16 left-1/2 -translate-x-1/2 pointer-events-auto flex gap-2"
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-[#8fa3ad]">{session?.user?.email || session?.user?.name}</span>
+          <button
+            onClick={() => signOut({ callbackUrl: "/login" })}
+            className="text-xs uppercase tracking-widest text-[#c47a6e] hover:text-[#d99a8f]"
           >
-            <input
-              type="text"
-              value={speciesQuery}
-              onChange={(e) => setSpeciesQuery(e.target.value)}
-              placeholder="Scientific name (e.g. Acropora cervicornis)"
-              className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-1 text-xs text-[#d3dbe0] placeholder:text-[#5a6a72] outline-none focus:border-[#8fa3ad] w-64"
-            />
-            <button
-              type="submit"
-              className="bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-1 text-xs uppercase tracking-widest text-[#d3dbe0] hover:bg-[#8fa3ad]/20"
-            >
-              Plot
-            </button>
-          </form>
-        )}
+            Sign out
+          </button>
+        </div>
+      </div>
 
-        {isMapMode && (
-          <div className="absolute bottom-4 left-4 flex gap-4">
-            <div className="flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#8fa3ad]" />
-              <span className="text-[10px] text-[#b7c4cc]">verified sighting</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-[#a48a55]" />
-              <span className="text-[10px] text-[#d8b877]">unvalidated detection</span>
-            </div>
+      {/* Species search — only relevant in map mode, sits just under the top bar */}
+      {isMapMode && (
+        <form
+          onSubmit={handleSpeciesSearch}
+          className="absolute top-[68px] left-1/2 -translate-x-1/2 pointer-events-auto flex gap-2"
+        >
+          <input
+            type="text"
+            value={speciesQuery}
+            onChange={(e) => setSpeciesQuery(e.target.value)}
+            placeholder="Scientific name (e.g. Acropora cervicornis)"
+            className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-1 text-xs text-[#d3dbe0] placeholder:text-[#5a6a72] outline-none focus:border-[#8fa3ad] w-64"
+          />
+          <button
+            type="submit"
+            className="bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-1 text-xs uppercase tracking-widest hover:bg-[#8fa3ad]/20"
+          >
+            Plot
+          </button>
+        </form>
+      )}
+
+      {/* ================= LEFT PANEL — one grouped telemetry card ================= */}
+      <div className="absolute top-[70px] left-4 w-56 bg-[#1c2226]/90 border border-[#3a444a] rounded-xl divide-y divide-[#3a444a] pointer-events-none">
+        <div className="px-4 py-2.5">
+          <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">Coordinates · measured</p>
+          <p className="text-sm">{telemetry.coords}</p>
+        </div>
+        <div className="px-4 py-2.5">
+          <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">
+            Temp · {telemetry.tempSource === "live" ? "measured" : "—"}
+          </p>
+          <p className="text-lg font-bold">{telemetry.temp}</p>
+        </div>
+        <div className="px-4 py-2.5">
+          <p className="text-[10px] uppercase tracking-widest text-[#a48a55]">Depth · simulated</p>
+          <p className="text-lg font-bold">{telemetry.depth}</p>
+        </div>
+        <div className="px-4 py-2.5">
+          <p className="text-[10px] uppercase tracking-widest text-[#a48a55]">Salinity · simulated</p>
+          <p className="text-sm border-b border-dashed border-[#a48a55] inline-block">{telemetry.salinity}</p>
+        </div>
+        <div className="px-4 py-2.5">
+          <p className="text-[10px] uppercase tracking-widest text-[#a48a55]">Heading · simulated</p>
+          <p className="text-sm border-b border-dashed border-[#a48a55] inline-block">{telemetry.heading}</p>
+        </div>
+        {!isMapMode && coralBleachingRatio !== null && (
+          <div className="px-4 py-2.5">
+            <p className="text-[10px] uppercase tracking-widest text-[#d8b877]">Coral · unvalidated model</p>
+            <p className={`text-sm ${alert ? "text-[#d8b877]" : ""}`}>
+              {(coralBleachingRatio * 100).toFixed(0)}% bleached
+            </p>
           </div>
         )}
+      </div>
 
+      {isMapMode && (
+        <div className="absolute bottom-4 left-4 flex gap-4">
+          <div className="flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#8fa3ad]" />
+            <span className="text-[10px] text-[#b7c4cc]">verified sighting</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-[#a48a55]" />
+            <span className="text-[10px] text-[#d8b877]">unvalidated detection</span>
+          </div>
+        </div>
+      )}
+
+      {/* ================= RIGHT PANEL — one grouped action stack ================= */}
+      <div className="absolute top-[70px] right-4 w-48 flex flex-col gap-2 pointer-events-auto">
+        <button
+          onClick={handleDiscoverySnapshot}
+          className="bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20"
+        >
+          Snapshot
+        </button>
+        <button
+          onClick={handleExportReport}
+          disabled={exportingReport}
+          className="bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+        >
+          {exportingReport && <span className="w-1.5 h-1.5 rounded-full bg-[#8fa3ad] animate-pulse" />}
+          {exportingReport ? "Generating…" : "Export field report"}
+        </button>
+        <button
+          onClick={handleEmailReport}
+          disabled={emailingReport}
+          className="bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+        >
+          {emailingReport && <span className="w-1.5 h-1.5 rounded-full bg-[#8fa3ad] animate-pulse" />}
+          {emailingReport ? "Sending…" : "Email report"}
+        </button>
         {!isMapMode && (
-          <div className="absolute bottom-20 left-4 pointer-events-auto flex flex-col gap-2">
-            <div className="flex gap-2">
+          <button
+            onClick={handleOpenLibrary}
+            className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left text-[#b7c4cc] hover:bg-white/[0.08]"
+          >
+            Clip library
+          </button>
+        )}
+
+        {/* Single toast slot for action feedback — replaces the previously scattered snapshot/email message boxes */}
+        {activeToast && (
+          <div
+            className={`rounded-lg px-3 py-2 text-[11px] border ${
+              activeToast.type === "success"
+                ? "bg-[#8fa3ad]/10 border-[#8fa3ad]/50 text-[#b7c4cc]"
+                : activeToast.type === "error"
+                ? "bg-[#c47a6e]/10 border-[#c47a6e]/50 text-[#d99a8f]"
+                : "bg-white/[0.04] border-[#3a444a] text-[#d3dbe0]"
+            }`}
+          >
+            {activeToast.text}
+          </div>
+        )}
+      </div>
+
+      {!isMapMode && alert && (
+        <div className="absolute bottom-20 right-4 bg-[#a48a55]/10 border border-[#b38d47] text-[#d8b877] rounded-xl px-4 py-2 text-xs">
+          Possible bleaching — unverified
+        </div>
+      )}
+
+      {!isMapMode && (
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-16 h-16 border border-[#8fa3ad]/60 rounded-full animate-pulse pointer-events-none" />
+      )}
+
+      {/* ================= BOTTOM BAR — video source controls, one row ================= */}
+      {!isMapMode && (
+        <div className="absolute bottom-0 left-0 right-0 bg-[#1c2226]/90 border-t border-[#3a444a] px-4 py-3 pointer-events-auto">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={handleUseDefaultClip}
+              className={`border rounded-lg px-3 py-1.5 text-[10px] uppercase tracking-widest ${
+                videoSourceMode === "default"
+                  ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
+                  : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
+              }`}
+            >
+              Default clip
+            </button>
+            <button
+              onClick={handleUploadClick}
+              className={`border rounded-lg px-3 py-1.5 text-[10px] uppercase tracking-widest ${
+                videoSourceMode === "upload"
+                  ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
+                  : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
+              }`}
+            >
+              Upload video
+            </button>
+            <button
+              onClick={handleUseWebcam}
+              className={`border rounded-lg px-3 py-1.5 text-[10px] uppercase tracking-widest ${
+                videoSourceMode === "webcam"
+                  ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
+                  : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
+              }`}
+            >
+              Use webcam
+            </button>
+
+            <form onSubmit={handleUseVideoUrl} className="flex gap-2 ml-1">
+              <input
+                type="text"
+                value={videoUrlInput}
+                onChange={(e) => setVideoUrlInput(e.target.value)}
+                placeholder="Paste a direct .mp4 video URL…"
+                className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-2 py-1.5 text-[10px] placeholder:text-[#5a6a72] outline-none focus:border-[#8fa3ad] w-56"
+              />
               <button
-                onClick={handleUseDefaultClip}
-                className={`border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest ${
-                  videoSourceMode === "default"
-                    ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
+                type="submit"
+                className={`border rounded-lg px-3 py-1.5 text-[10px] uppercase tracking-widest ${
+                  videoSourceMode === "url"
+                    ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
                     : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
                 }`}
               >
-                Default clip
+                Load URL
               </button>
-              <button
-                onClick={handleUploadClick}
-                className={`border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest ${
-                  videoSourceMode === "upload"
-                    ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
-                    : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
-                }`}
-              >
-                Upload video
-              </button>
-              <button
-                onClick={handleUseWebcam}
-                className={`border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest ${
-                  videoSourceMode === "webcam"
-                    ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
-                    : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
-                }`}
-              >
-                Use webcam
-              </button>
-              <button
-                onClick={handleOpenLibrary}
-                className="border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
-              >
-                Clip library
-              </button>
-            </div>
+            </form>
 
             {videoSourceMode === "upload" && uploadedFile && (
-              <div className="flex items-center gap-2 bg-white/[0.04] border border-[#3a444a] rounded-lg px-2 py-1">
+              <div className="flex items-center gap-2 bg-white/[0.04] border border-[#3a444a] rounded-lg px-2 py-1.5 ml-1">
                 <label className="flex items-center gap-1 text-[10px] text-[#b7c4cc] cursor-pointer">
                   <input
                     type="checkbox"
@@ -607,34 +712,16 @@ export default function MissionControl() {
 
             {clipSaveMessage && (
               <span
-                className={`text-[10px] rounded px-2 py-1 bg-black/40 ${
+                className={`text-[10px] rounded px-2 py-1 ${
                   clipSaveMessage.type === "success" ? "text-[#8fa3ad]" : "text-[#c47a6e]"
                 }`}
               >
                 {clipSaveMessage.text}
               </span>
             )}
-            <form onSubmit={handleUseVideoUrl} className="flex gap-2">
-              <input
-                type="text"
-                value={videoUrlInput}
-                onChange={(e) => setVideoUrlInput(e.target.value)}
-                placeholder="Paste a direct .mp4 video URL…"
-                className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-2 py-1 text-[10px] text-[#d3dbe0] placeholder:text-[#5a6a72] outline-none focus:border-[#8fa3ad] w-56"
-              />
-              <button
-                type="submit"
-                className={`border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest ${
-                  videoSourceMode === "url"
-                    ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
-                    : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
-                }`}
-              >
-                Load URL
-              </button>
-            </form>
+
             {(webcamError || (videoLoadError && videoSourceMode !== "url")) && (
-              <span className="text-[10px] text-[#c47a6e] bg-black/40 rounded px-2 py-1">
+              <span className="text-[10px] text-[#c47a6e]">
                 {webcamError ||
                   (videoSourceMode === "default"
                     ? "Default clip failed to load — check frontend/public/rov-feed.mp4 exists"
@@ -642,185 +729,86 @@ export default function MissionControl() {
               </span>
             )}
           </div>
-        )}
-
-        <button
-          onClick={handleDiscoverySnapshot}
-          className="absolute top-4 right-4 translate-y-32 pointer-events-auto bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-xl px-4 py-2 text-xs uppercase tracking-widest text-[#d3dbe0] hover:bg-[#8fa3ad]/20"
-        >
-          Snapshot
-        </button>
-
-        <button
-          onClick={handleExportReport}
-          disabled={exportingReport}
-          className="absolute top-4 right-56 pointer-events-auto bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-xl px-4 py-2 text-xs uppercase tracking-widest text-[#d3dbe0] hover:bg-[#8fa3ad]/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-        >
-          {exportingReport ? (
-            <>
-              <span className="w-2 h-2 rounded-full bg-[#8fa3ad] animate-pulse" />
-              Generating…
-            </>
-          ) : (
-            <>Export field report</>
-          )}
-        </button>
-
-        <button
-          onClick={handleEmailReport}
-          disabled={emailingReport}
-          className="absolute top-4 right-[420px] pointer-events-auto bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-xl px-4 py-2 text-xs uppercase tracking-widest text-[#d3dbe0] hover:bg-[#8fa3ad]/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-        >
-          {emailingReport ? (
-            <>
-              <span className="w-2 h-2 rounded-full bg-[#8fa3ad] animate-pulse" />
-              Sending…
-            </>
-          ) : (
-            <>Email report</>
-          )}
-        </button>
-
-        {emailReportMessage && (
-          <div
-            className={`absolute top-16 right-4 border rounded-xl px-4 py-2 text-xs uppercase tracking-widest ${
-              emailReportMessage.type === "success"
-                ? "bg-[#8fa3ad]/10 border-[#8fa3ad]/50 text-[#b7c4cc]"
-                : "bg-[#c47a6e]/10 border-[#c47a6e]/50 text-[#d99a8f]"
-            }`}
-          >
-            {emailReportMessage.text}
-          </div>
-        )}
-
-        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-white/[0.04] border border-[#3a444a] rounded-xl px-6 py-2 flex gap-6">
-          <span>
-            <span className="text-[9px] text-[#8fa3ad] tracking-wide">TEMP</span>{" "}
-            <span className="text-[#d3dbe0]">{telemetry.temp}</span>
-            {telemetry.tempSource === "live" && (
-              <span className="ml-1 text-[9px] text-[#8fa3ad] align-super">measured</span>
-            )}
-          </span>
-          <span>
-            <span className="text-[9px] text-[#a48a55] tracking-wide">SALINITY</span>{" "}
-            <span className="text-[#a48a55] border-b border-dashed border-[#a48a55]">{telemetry.salinity}</span>
-          </span>
-          <span>
-            <span className="text-[9px] text-[#a48a55] tracking-wide">HEADING</span>{" "}
-            <span className="text-[#a48a55] border-b border-dashed border-[#a48a55]">{telemetry.heading}</span>
-          </span>
-          {!isMapMode && coralBleachingRatio !== null && (
-            <span>
-              <span className="text-[9px] text-[#d8b877] tracking-wide">CORAL · unvalidated model</span>{" "}
-              <span className={alert ? "text-[#d8b877]" : "text-[#d3dbe0]"}>
-                {(coralBleachingRatio * 100).toFixed(0)}% bleached
-              </span>
-            </span>
-          )}
         </div>
+      )}
 
-        {!isMapMode && (
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-16 h-16 border border-[#8fa3ad]/60 rounded-full animate-pulse" />
-        )}
+      {libraryOpen && (
+        <div className="absolute inset-0 bg-black/70 pointer-events-auto flex items-center justify-center">
+          <div className="w-full max-w-md max-h-[70vh] flex flex-col bg-[#1c2226] border border-[#3a444a] rounded-xl overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-[#3a444a]">
+              <span className="text-xs uppercase tracking-widest text-[#8fa3ad]">Clip library</span>
+              <button
+                onClick={() => setLibraryOpen(false)}
+                className="text-[#8fa3ad] hover:text-[#d3dbe0] text-sm"
+              >
+                ✕
+              </button>
+            </div>
 
-        {!isMapMode && alert && (
-          <div className="absolute bottom-4 right-4 bg-[#a48a55]/10 border border-[#b38d47] text-[#d8b877] rounded-xl px-4 py-2">
-            Possible bleaching — unverified
-          </div>
-        )}
+            <div className="flex gap-2 px-4 pt-3">
+              <button
+                onClick={() => handleSwitchLibraryScope("mine")}
+                className={`flex-1 rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest border ${
+                  libraryScope === "mine"
+                    ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
+                    : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
+                }`}
+              >
+                My clips
+              </button>
+              <button
+                onClick={() => handleSwitchLibraryScope("shared")}
+                className={`flex-1 rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest border ${
+                  libraryScope === "shared"
+                    ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
+                    : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
+                }`}
+              >
+                Team clips
+              </button>
+            </div>
 
-        {snapshotMessage && (
-          <div
-            className={`absolute top-1/2 left-1/2 -translate-x-1/2 translate-y-24 border rounded-xl px-4 py-2 text-xs uppercase tracking-widest ${
-              snapshotMessage.type === "success"
-                ? "bg-[#8fa3ad]/10 border-[#8fa3ad]/50 text-[#b7c4cc]"
-                : snapshotMessage.type === "error"
-                ? "bg-[#c47a6e]/10 border-[#c47a6e]/50 text-[#d99a8f]"
-                : "bg-white/[0.04] border-[#3a444a] text-[#d3dbe0]"
-            }`}
-          >
-            {snapshotMessage.text}
-          </div>
-        )}
-
-        {libraryOpen && (
-          <div className="absolute inset-0 bg-black/70 pointer-events-auto flex items-center justify-center">
-            <div className="w-full max-w-md max-h-[70vh] flex flex-col bg-[#1c2226] border border-[#3a444a] rounded-xl overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-3 border-b border-[#3a444a]">
-                <span className="text-xs uppercase tracking-widest text-[#8fa3ad]">Clip library</span>
-                <button
-                  onClick={() => setLibraryOpen(false)}
-                  className="text-[#8fa3ad] hover:text-[#d3dbe0] text-sm"
-                >
-                  ✕
-                </button>
-              </div>
-
-              <div className="flex gap-2 px-4 pt-3">
-                <button
-                  onClick={() => handleSwitchLibraryScope("mine")}
-                  className={`flex-1 rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest border ${
-                    libraryScope === "mine"
-                      ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
-                      : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
-                  }`}
-                >
-                  My clips
-                </button>
-                <button
-                  onClick={() => handleSwitchLibraryScope("shared")}
-                  className={`flex-1 rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest border ${
-                    libraryScope === "shared"
-                      ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
-                      : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
-                  }`}
-                >
-                  Team clips
-                </button>
-              </div>
-
-              <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-2">
-                {libraryLoading && (
-                  <span className="text-[10px] text-[#5a6a72] uppercase tracking-widest">Loading…</span>
+            <div className="flex-1 overflow-y-auto px-4 py-3 flex flex-col gap-2">
+              {libraryLoading && (
+                <span className="text-[10px] text-[#5a6a72] uppercase tracking-widest">Loading…</span>
+              )}
+              {!libraryLoading &&
+                (libraryScope === "mine" ? myClips : sharedClips).length === 0 && (
+                  <span className="text-[10px] text-[#5a6a72]">
+                    {libraryScope === "mine"
+                      ? "No saved clips yet — upload a video and hit \"Save to library.\""
+                      : "No shared clips yet."}
+                  </span>
                 )}
-                {!libraryLoading &&
-                  (libraryScope === "mine" ? myClips : sharedClips).length === 0 && (
-                    <span className="text-[10px] text-[#5a6a72]">
-                      {libraryScope === "mine"
-                        ? "No saved clips yet — upload a video and hit \"Save to library.\""
-                        : "No shared clips yet."}
-                    </span>
-                  )}
-                {(libraryScope === "mine" ? myClips : sharedClips).map((clip) => (
-                  <div
-                    key={clip.id}
-                    className="flex items-center gap-2 bg-white/[0.04] border border-[#3a444a] hover:border-[#8fa3ad]/60 hover:bg-white/[0.08] rounded-lg overflow-hidden"
+              {(libraryScope === "mine" ? myClips : sharedClips).map((clip) => (
+                <div
+                  key={clip.id}
+                  className="flex items-center gap-2 bg-white/[0.04] border border-[#3a444a] hover:border-[#8fa3ad]/60 hover:bg-white/[0.08] rounded-lg overflow-hidden"
+                >
+                  <button
+                    onClick={() => handleLoadClipFromLibrary(clip)}
+                    className="flex-1 text-left px-3 py-2"
                   >
+                    <p className="text-xs">{clip.name}</p>
+                    <p className="text-[10px] text-[#5a6a72]">
+                      {libraryScope === "shared" ? clip.owner_email : new Date(clip.created_at).toLocaleDateString()}
+                    </p>
+                  </button>
+                  {clip.owner_email === session?.user?.email && (
                     <button
-                      onClick={() => handleLoadClipFromLibrary(clip)}
-                      className="flex-1 text-left px-3 py-2"
+                      onClick={(e) => handleDeleteClip(clip, e)}
+                      title="Delete clip"
+                      className="px-3 py-2 text-[#c47a6e] hover:text-[#d99a8f] text-xs"
                     >
-                      <p className="text-xs text-[#d3dbe0]">{clip.name}</p>
-                      <p className="text-[10px] text-[#5a6a72]">
-                        {libraryScope === "shared" ? clip.owner_email : new Date(clip.created_at).toLocaleDateString()}
-                      </p>
+                      🗑
                     </button>
-                    {clip.owner_email === session?.user?.email && (
-                      <button
-                        onClick={(e) => handleDeleteClip(clip, e)}
-                        title="Delete clip"
-                        className="px-3 py-2 text-[#c47a6e] hover:text-[#d99a8f] text-xs"
-                      >
-                        🗑
-                      </button>
-                    )}
-                  </div>
-                ))}
-              </div>
+                  )}
+                </div>
+              ))}
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       <div className="crt-scanlines absolute inset-0 pointer-events-none opacity-10" />
     </div>
