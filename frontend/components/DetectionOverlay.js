@@ -2,6 +2,16 @@
 
 import { useEffect, useRef } from "react";
 
+// Keep label text out of the fixed chrome zones defined in page.js:
+// top bar (0–56px), left telemetry panel (~0–240px wide), right action
+// panel (last ~200px wide). Labels nudge below/inward instead of
+// overlapping those regions.
+const TOP_BAR_HEIGHT = 56;
+const LEFT_PANEL_WIDTH = 240;
+const RIGHT_PANEL_WIDTH = 200;
+const LABEL_HEIGHT = 16;
+const TAG_HEIGHT = 13;
+
 /**
  * Renders YOLO bounding boxes on a <canvas> positioned exactly over the
  * given <video> element. Boxes are in the original frame's pixel space
@@ -33,20 +43,59 @@ export default function DetectionOverlay({ videoRef, boxes }) {
         const by = y1 * scaleY;
         const bw = (x2 - x1) * scaleX;
         const bh = (y2 - y1) * scaleY;
+        const lowConfidence = confidence < 0.75;
 
-        ctx.strokeStyle = "#22d3ee";
+        // Box — slate for higher-confidence, dashed for lower-confidence
+        ctx.strokeStyle = "#8fa3ad";
         ctx.lineWidth = 2;
+        if (lowConfidence) {
+          ctx.setLineDash([5, 4]);
+          ctx.globalAlpha = 0.7;
+        } else {
+          ctx.setLineDash([]);
+          ctx.globalAlpha = 1;
+        }
         ctx.strokeRect(bx, by, bw, bh);
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
 
-        const text = `${label} ${(confidence * 100).toFixed(0)}%`;
+        const labelText = `${label} ${(confidence * 100).toFixed(0)}%`;
+        const tagText = "unvalidated model";
         ctx.font = "12px monospace";
-        const textWidth = ctx.measureText(text).width;
+        const labelWidth = ctx.measureText(labelText).width;
+        ctx.font = "9px monospace";
+        const tagWidth = ctx.measureText(tagText).width;
+        const blockWidth = Math.max(labelWidth, tagWidth) + 8;
+        const blockHeight = LABEL_HEIGHT + TAG_HEIGHT;
 
-        ctx.fillStyle = "rgba(34, 211, 238, 0.85)";
-        ctx.fillRect(bx, Math.max(0, by - 16), textWidth + 8, 16);
+        // Default: stack label+tag above the box. If that would sit under
+        // the top bar, place it below the box instead.
+        let blockTop = by - blockHeight;
+        if (blockTop < TOP_BAR_HEIGHT) {
+          blockTop = by + bh + 2;
+        }
 
-        ctx.fillStyle = "#000";
-        ctx.fillText(text, bx + 4, Math.max(11, by - 4));
+        // Clamp horizontally so the block never runs into the left or
+        // right chrome panels.
+        let blockLeft = bx;
+        blockLeft = Math.max(LEFT_PANEL_WIDTH + 4, blockLeft);
+        blockLeft = Math.min(canvas.width - RIGHT_PANEL_WIDTH - blockWidth - 4, blockLeft);
+        if (blockLeft < LEFT_PANEL_WIDTH + 4) {
+          // Canvas narrower than both panels combined — just clamp to canvas.
+          blockLeft = Math.max(4, Math.min(canvas.width - blockWidth - 4, bx));
+        }
+
+        ctx.fillStyle = "rgba(143, 163, 173, 0.85)";
+        ctx.fillRect(blockLeft, blockTop, blockWidth, LABEL_HEIGHT);
+        ctx.fillStyle = "#0c1113";
+        ctx.font = "12px monospace";
+        ctx.fillText(labelText, blockLeft + 4, blockTop + 12);
+
+        ctx.fillStyle = "rgba(164, 138, 85, 0.85)";
+        ctx.fillRect(blockLeft, blockTop + LABEL_HEIGHT, blockWidth, TAG_HEIGHT);
+        ctx.fillStyle = "#241d10";
+        ctx.font = "9px monospace";
+        ctx.fillText(tagText, blockLeft + 4, blockTop + LABEL_HEIGHT + 10);
       });
     }
 
