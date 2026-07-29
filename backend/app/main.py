@@ -3,6 +3,7 @@ import re
 from typing import List, Optional
 
 from dotenv import load_dotenv
+from .species_info import get_species_info
 
 # Must run BEFORE importing app.inference or app.alerts, since both read
 # env vars (ROBOFLOW_API_KEY, N8N_DETECTION_WEBHOOK_URL) from the
@@ -635,3 +636,12 @@ async def telemetry_socket(websocket: WebSocket):
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         pass
+
+@app.get("/species-info")
+async def species_info(name: str):
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    try:
+        return await get_species_info(name)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Species info lookup failed: {e}")
