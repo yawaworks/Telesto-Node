@@ -99,6 +99,14 @@ export default function LoginPage() {
             className="bg-black/20 border border-[#3a444a] rounded-lg px-3 py-2 text-sm text-[#d3dbe0] placeholder-[#5a6a72] outline-none focus:border-[#8fa3ad]"
           />
 
+          {mode === "signin" && (
+            <div className="text-right -mt-1">
+              <Link href="/forgot-password" className="text-xs text-[#8fa3ad] hover:text-[#d3dbe0]">
+                Forgot password?
+              </Link>
+            </div>
+          )}
+
           {error && <p className="text-xs text-[#d8877a]">{error}</p>}
 
           <button
