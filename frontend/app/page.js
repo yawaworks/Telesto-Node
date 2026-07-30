@@ -73,6 +73,15 @@ export default function MissionControl() {
   const alert =
     coralBleachingRatio !== null && coralBleachingRatio >= BLEACHING_ALERT_THRESHOLD;
 
+  // Mirrors `boxes` into a ref so handleDiscoverySnapshot (and the gamepad
+  // A-button path, which calls the same function via a ref) always reads
+  // the latest detected species without needing to be redeclared every
+  // render or added as a dependency anywhere.
+  const boxesRef = useRef(boxes);
+  useEffect(() => {
+    boxesRef.current = boxes;
+  }, [boxes]);
+
   useEffect(() => {
     const map = initBathymetryMap(mapContainerRef.current);
     mapRef.current = map;
@@ -289,13 +298,19 @@ export default function MissionControl() {
       formData.append("file", blob, `discovery-${Date.now()}.jpg`);
 
       const t = telemetryRef.current;
+      // Prefer whatever's actually detected on screen right now over the
+      // unrelated map search box — falls back to speciesQuery only if
+      // nothing is currently in frame. Read via ref so this always sees
+      // the latest detection, whether triggered by the on-screen button
+      // or the gamepad A-button path.
+      const detectedLabel = boxesRef.current?.[0]?.label;
       const params = new URLSearchParams({
         depth: t.depth || "",
         coords: t.coords || "",
         temp: t.temp || "",
         salinity: t.salinity || "",
         heading: t.heading || "",
-        species_query: speciesQuery || "",
+        species_query: detectedLabel || speciesQuery || "",
       });
 
       setSnapshotMessage({ type: "pending", text: "Saving snapshot…" });
@@ -528,7 +543,6 @@ export default function MissionControl() {
         </form>
       )}
 
-      {/* ================= LEFT PANEL — already pointer-events-none, no bug here ================= */}
       <div className="absolute top-[70px] left-4 w-56 bg-[#1c2226]/90 border border-[#3a444a] rounded-xl divide-y divide-[#3a444a] pointer-events-none">
         <div className="px-4 py-2.5">
           <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">Coordinates · measured</p>
@@ -575,19 +589,6 @@ export default function MissionControl() {
         </div>
       )}
 
-      {/* ================= RIGHT PANEL — BUG FIX =================
-          Was `pointer-events-auto` on this whole w-48 container, which
-          blocked mouse events for the entire column — including empty
-          gaps between buttons — from reaching the detection canvas
-          underneath. A species swimming behind this panel was completely
-          unhoverable, even in spots with no button actually covering it.
-
-          Fixed: container is now pointer-events-none; each button/toast
-          gets pointer-events-auto individually. Only the exact rectangle
-          each button occupies still blocks the canvas (unavoidable — a
-          button needs to catch clicks where it's drawn); everywhere else
-          in the column, hover now passes straight through to whatever's
-          behind it. */}
       <div className="absolute top-[70px] right-4 w-48 flex flex-col gap-2 pointer-events-none">
         <button
           onClick={handleDiscoverySnapshot}
