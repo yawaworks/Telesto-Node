@@ -66,10 +66,6 @@ export default function MissionControl() {
   const [sharedClips, setSharedClips] = useState([]);
   const [libraryLoading, setLibraryLoading] = useState(false);
 
-  // NOTE: ghostBoxes carried over from your working version — I don't have
-  // visibility into what useFrameDetection does with it internally, so
-  // it's passed straight through unchanged. See the note on DetectionOverlay
-  // below for how it's rendered.
   const { boxes, ghostBoxes, coralBleachingRatio, status } = useFrameDetection(videoRef, {
     enabled: viewMode === "video" && !videoLoadError,
     telemetry,
@@ -383,8 +379,6 @@ export default function MissionControl() {
 
   const isMapMode = viewMode === "map";
 
-  // Single slot for transient status messages (snapshot / email), so only
-  // one ever shows at a time instead of stacking in unrelated corners.
   const activeToast = emailReportMessage || snapshotMessage;
 
   if (sessionStatus === "unauthenticated") {
@@ -449,7 +443,6 @@ export default function MissionControl() {
         }}
       />
 
-      {/* ================= TOP BAR — mode toggle / status / account. Nothing else lives here. ================= */}
       <div className="absolute top-0 left-0 right-0 h-14 flex items-center justify-between px-4 bg-[#1c2226]/90 border-b border-[#3a444a] pointer-events-auto">
         <div className="flex gap-2">
           <button
@@ -514,7 +507,6 @@ export default function MissionControl() {
         </div>
       </div>
 
-      {/* Species search — only relevant in map mode, sits just under the top bar */}
       {isMapMode && (
         <form
           onSubmit={handleSpeciesSearch}
@@ -536,7 +528,7 @@ export default function MissionControl() {
         </form>
       )}
 
-      {/* ================= LEFT PANEL — one grouped telemetry card ================= */}
+      {/* ================= LEFT PANEL — already pointer-events-none, no bug here ================= */}
       <div className="absolute top-[70px] left-4 w-56 bg-[#1c2226]/90 border border-[#3a444a] rounded-xl divide-y divide-[#3a444a] pointer-events-none">
         <div className="px-4 py-2.5">
           <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">Coordinates · measured</p>
@@ -583,18 +575,30 @@ export default function MissionControl() {
         </div>
       )}
 
-      {/* ================= RIGHT PANEL — one grouped action stack ================= */}
-      <div className="absolute top-[70px] right-4 w-48 flex flex-col gap-2 pointer-events-auto">
+      {/* ================= RIGHT PANEL — BUG FIX =================
+          Was `pointer-events-auto` on this whole w-48 container, which
+          blocked mouse events for the entire column — including empty
+          gaps between buttons — from reaching the detection canvas
+          underneath. A species swimming behind this panel was completely
+          unhoverable, even in spots with no button actually covering it.
+
+          Fixed: container is now pointer-events-none; each button/toast
+          gets pointer-events-auto individually. Only the exact rectangle
+          each button occupies still blocks the canvas (unavoidable — a
+          button needs to catch clicks where it's drawn); everywhere else
+          in the column, hover now passes straight through to whatever's
+          behind it. */}
+      <div className="absolute top-[70px] right-4 w-48 flex flex-col gap-2 pointer-events-none">
         <button
           onClick={handleDiscoverySnapshot}
-          className="bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20"
+          className="pointer-events-auto bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20"
         >
           Snapshot
         </button>
         <button
           onClick={handleExportReport}
           disabled={exportingReport}
-          className="bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          className="pointer-events-auto bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
         >
           {exportingReport && <span className="w-1.5 h-1.5 rounded-full bg-[#8fa3ad] animate-pulse" />}
           {exportingReport ? "Generating…" : "Export field report"}
@@ -602,7 +606,7 @@ export default function MissionControl() {
         <button
           onClick={handleEmailReport}
           disabled={emailingReport}
-          className="bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          className="pointer-events-auto bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
         >
           {emailingReport && <span className="w-1.5 h-1.5 rounded-full bg-[#8fa3ad] animate-pulse" />}
           {emailingReport ? "Sending…" : "Email report"}
@@ -610,7 +614,7 @@ export default function MissionControl() {
         {!isMapMode && (
           <button
             onClick={handleOpenLibrary}
-            className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left text-[#b7c4cc] hover:bg-white/[0.08]"
+            className="pointer-events-auto bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left text-[#b7c4cc] hover:bg-white/[0.08]"
           >
             Clip library
           </button>
@@ -618,7 +622,7 @@ export default function MissionControl() {
 
         {activeToast && (
           <div
-            className={`rounded-lg px-3 py-2 text-[11px] border ${
+            className={`pointer-events-auto rounded-lg px-3 py-2 text-[11px] border ${
               activeToast.type === "success"
                 ? "bg-[#8fa3ad]/10 border-[#8fa3ad]/50 text-[#b7c4cc]"
                 : activeToast.type === "error"
@@ -641,7 +645,6 @@ export default function MissionControl() {
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-16 h-16 border border-[#8fa3ad]/60 rounded-full animate-pulse pointer-events-none" />
       )}
 
-      {/* ================= BOTTOM BAR — video source controls, one row ================= */}
       {!isMapMode && (
         <div className="absolute bottom-0 left-0 right-0 bg-[#1c2226]/90 border-t border-[#3a444a] px-4 py-3 pointer-events-auto">
           <div className="flex flex-wrap items-center gap-2">

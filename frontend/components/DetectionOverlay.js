@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
 
@@ -14,60 +14,42 @@ const RIGHT_PANEL_WIDTH = 200;
 const LABEL_HEIGHT = 16;
 const TAG_HEIGHT = 13;
 
-// Tooltip is w-64 (256px) — used to clamp its horizontal center so it can
-// never render partially off-screen or under the side chrome panels.
-const TOOLTIP_WIDTH = 256;
-const TOOLTIP_HALF_WIDTH = TOOLTIP_WIDTH / 2;
-const TOOLTIP_EDGE_PADDING = 8;
-const TOOLTIP_GAP = 8; // gap between the box edge and the tooltip
-
-const HOVER_DEBOUNCE_MS = 300;
-// Grace period before actually hiding the tooltip once the mouse leaves a
-// box's hit region. Without this, moving the cursor from the box toward
-// the tooltip itself (to read more, or click the Wikipedia link) crosses
-// a gap of "no hit" canvas space and the tooltip vanishes before you ever
-// get there.
-const HIDE_DELAY_MS = 250;
+// A little padding around the cropped capture so the species isn't cut
+// off flush against the bounding box edge — detection boxes are often a
+// touch tight against the actual animal.
+const CAPTURE_PADDING_PX = 8;
 
 /**
  * Renders YOLO bounding boxes on a <canvas> positioned exactly over the
- * given <video> element, and shows an AI-generated species detail tooltip
- * on hover. Boxes are in the original frame's pixel space (from the
- * backend), so we scale them to the video's displayed size.
+ * given <video> element. Boxes are in the original frame's pixel space
+ * (from the backend), so we scale them to the video's displayed size.
  *
  * `boxes` — species actually visible in the current frame. Solid outline.
  * `ghostBoxes` — species seen within the last few seconds but not
  * currently in frame (see useFrameDetection). Each carries a `videoTime`:
- * the exact video.currentTime they were last seen at. Drawn faint/dashed
- * at their last known position. Hovering a ghost box SEEKS the video back
- * to that timestamp (video.currentTime = ghost.videoTime) and pauses
- * there, bringing the species back into frame for as long as you hover —
- * this is a real rewind, not just a visual tooltip.
+ * the exact video.currentTime they were last seen at.
  *
- * Hovering either kind of box pauses the video so whatever's framed
- * doesn't swim off (or, for a ghost, immediately vanish again) while
- * you're reading the tooltip. Playback resumes once you actually stop
- * hovering both the box and the tooltip itself.
- *
- * The tooltip also shows related research papers (from OpenAlex, via the
- * same /species-info backend call) when the backend finds any — see the
- * "Related research" section below the Wikipedia/OBIS info.
+ * Interaction model: hovering a box only changes the cursor (a lightweight
+ * affordance) — nothing pauses or opens on hover alone. CLICKING a box
+ * pauses the video (and, for a ghost, seeks back to videoTime first) and
+ * opens a persistent "Species Inspector" modal: a cropped live capture of
+ * just that animal, its name, basic taxonomic info, a research diagram
+ * (from Wikipedia, once species_info.py returns one), and real related
+ * research papers (OpenAlex). The modal stays open until closed — no
+ * hover-tracking needed, since it isn't chasing the cursor around.
  */
 export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
   const canvasRef = useRef(null);
-  const tooltipRef = useRef(null);
+  const captureCanvasRef = useRef(null); // offscreen, used only for cropping — never rendered directly
   const scaledBoxesRef = useRef([]); // last-drawn boxes (real + ghost) in canvas pixel space, for hit-testing
-  const anchorRef = useRef({ x: 0, boxTop: 0, boxBottom: 0 });
 
-  const [hoveredLabel, setHoveredLabel] = useState(null);
-  const [hoveredIsGhost, setHoveredIsGhost] = useState(false);
-  const [tooltipStyle, setTooltipStyle] = useState({ top: 0, left: 0, visibility: "hidden" });
+  const [isHoveringBox, setIsHoveringBox] = useState(false); // cursor affordance only
+  const [selectedBox, setSelectedBox] = useState(null); // { label, ghost, videoTime } | null
+  const [captureDataUrl, setCaptureDataUrl] = useState(null);
   const [speciesData, setSpeciesData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState(null);
 
-  const debounceRef = useRef(null);
-  const hideTimeoutRef = useRef(null);
   const abortRef = useRef(null);
 
   useEffect(() => {
@@ -97,11 +79,14 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
         const bh = (y2 - y1) * scaleY;
         const lowConfidence = !isGhost && confidence < 0.75;
 
-        // Ghost boxes ARE hit-testable now — hovering one seeks the video
-        // back to the moment the species was last seen (see
-        // handleMouseMove below). videoTime travels with the box so the
-        // hover handler knows exactly where to seek to.
-        scaledBoxes.push({ label, confidence, bx, by, bw, bh, ghost: isGhost, videoTime });
+        // Original (unscaled) frame-pixel coordinates travel with the box
+        // too — the crop capture draws from the video's native resolution,
+        // not the displayed CSS size.
+        scaledBoxes.push({
+          label, confidence, bx, by, bw, bh,
+          ghost: isGhost, videoTime,
+          origX1: x1, origY1: y1, origX2: x2, origY2: y2,
+        });
 
         ctx.strokeStyle = isGhost ? "#a48a55" : "#8fa3ad";
         ctx.lineWidth = isGhost ? 1.5 : 2;
@@ -120,9 +105,7 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
         ctx.globalAlpha = 1;
 
         if (isGhost) {
-          // Small "hover to rewind" chip only — no confidence/model tag,
-          // since a ghost isn't a live reading.
-          const labelText = `${label} — hover to rewind`;
+          const labelText = `${label} — click to rewind`;
           ctx.font = "10px monospace";
           const labelWidth = ctx.measureText(labelText).width;
           const blockWidth = labelWidth + 8;
@@ -147,7 +130,7 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
         }
 
         const labelText = `${label} ${(confidence * 100).toFixed(0)}%`;
-        const tagText = "unvalidated model";
+        const tagText = "unvalidated model — click to inspect";
         ctx.font = "12px monospace";
         const labelWidth = ctx.measureText(labelText).width;
         ctx.font = "9px monospace";
@@ -194,41 +177,85 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
   }, [videoRef, boxes, ghostBoxes]);
 
   // Safety net: if this component unmounts (e.g. switching to Bathymetry
-  // Map view) while the video is paused for a hover, make sure it resumes
-  // rather than silently staying frozen when you switch back.
+  // Map view) while the video is paused for an open modal, make sure it
+  // resumes rather than silently staying frozen when you switch back.
   useEffect(() => {
     return () => {
       videoRef.current?.play().catch(() => {});
     };
   }, [videoRef]);
 
-  // Recomputes the tooltip's actual on-screen position against its real
-  // measured height (not a guess). Flips to below the box if there isn't
-  // room above it to clear the top chrome bar, and clamps against the
-  // bottom of the viewport too — long species descriptions (now including
-  // the research papers section) can no longer render partially
-  // off-screen in either direction.
-  const positionTooltip = useCallback(() => {
-    if (!tooltipRef.current) return;
-    const { x, boxTop, boxBottom } = anchorRef.current;
-    const height = tooltipRef.current.offsetHeight;
-
-    let top = boxTop - height - TOOLTIP_GAP;
-    if (top < TOP_BAR_HEIGHT) {
-      top = boxBottom + TOOLTIP_GAP;
+  // Close the modal on Escape, same as clicking the backdrop or the ✕.
+  useEffect(() => {
+    if (!selectedBox) return;
+    function onKeyDown(e) {
+      if (e.key === "Escape") closeModal();
     }
-    const maxTop = window.innerHeight - height - TOOLTIP_EDGE_PADDING;
-    top = Math.min(top, maxTop);
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedBox]);
 
-    setTooltipStyle({ top, left: x, visibility: "visible" });
-  }, []);
+  function hitTest(clientX, clientY) {
+    const canvas = canvasRef.current;
+    if (!canvas) return null;
+    const rect = canvas.getBoundingClientRect();
+    const mx = clientX - rect.left;
+    const my = clientY - rect.top;
 
-  // Re-measure whenever the tooltip's content shape changes (loading →
-  // loaded → error all change its height — and now research_papers
-  // arriving can meaningfully grow it), not just on first appearance.
-  useLayoutEffect(() => {
-    if (hoveredLabel) positionTooltip();
-  }, [hoveredLabel, speciesData, loading, fetchError, positionTooltip]);
+    // A few px of forgiveness around each box — detection boxes are often
+    // a little offset from the actual animal, so requiring an exact
+    // pixel-perfect click makes the feature feel broken even when it's
+    // working.
+    const HIT_PADDING = 6;
+    return scaledBoxesRef.current.find(
+      (b) =>
+        mx >= b.bx - HIT_PADDING &&
+        mx <= b.bx + b.bw + HIT_PADDING &&
+        my >= b.by - HIT_PADDING &&
+        my <= b.by + b.bh + HIT_PADDING
+    );
+  }
+
+  function handleMouseMove(e) {
+    // Cursor affordance only — no pausing, no fetching, no modal here.
+    const hit = hitTest(e.clientX, e.clientY);
+    setIsHoveringBox(!!hit);
+  }
+
+  // Crops just the clicked box's region out of the video's CURRENT frame,
+  // at native video resolution (not the scaled-down display size).
+  const captureCrop = useCallback((hit) => {
+    const video = videoRef.current;
+    if (!video || !video.videoWidth || !video.videoHeight) return;
+
+    if (!captureCanvasRef.current) {
+      captureCanvasRef.current = document.createElement("canvas");
+    }
+    const cropCanvas = captureCanvasRef.current;
+
+    const x1 = Math.max(0, hit.origX1 - CAPTURE_PADDING_PX);
+    const y1 = Math.max(0, hit.origY1 - CAPTURE_PADDING_PX);
+    const x2 = Math.min(video.videoWidth, hit.origX2 + CAPTURE_PADDING_PX);
+    const y2 = Math.min(video.videoHeight, hit.origY2 + CAPTURE_PADDING_PX);
+    const w = Math.max(1, x2 - x1);
+    const h = Math.max(1, y2 - y1);
+
+    cropCanvas.width = w;
+    cropCanvas.height = h;
+    const ctx = cropCanvas.getContext("2d");
+    ctx.drawImage(video, x1, y1, w, h, 0, 0, w, h);
+
+    try {
+      setCaptureDataUrl(cropCanvas.toDataURL("image/jpeg", 0.85));
+    } catch (err) {
+      // Tainted-canvas security error if the video source isn't
+      // same-origin/CORS-cleared — fails silently, modal just won't show
+      // a thumbnail for that source rather than crashing.
+      console.error("[DetectionOverlay] capture crop failed:", err);
+      setCaptureDataUrl(null);
+    }
+  }, [videoRef]);
 
   const fetchSpeciesInfo = useCallback((label) => {
     if (abortRef.current) abortRef.current.abort();
@@ -239,8 +266,6 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
     setFetchError(null);
     setSpeciesData(null);
 
-    console.debug("[DetectionOverlay] fetching species info for:", label);
-
     fetch(`${API_BASE_URL}/species-info?name=${encodeURIComponent(label)}`, {
       signal: controller.signal,
     })
@@ -248,10 +273,7 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
         if (!res.ok) throw new Error(`Lookup failed: ${res.status}`);
         return res.json();
       })
-      .then((data) => {
-        console.debug("[DetectionOverlay] species info result:", data);
-        setSpeciesData(data);
-      })
+      .then((data) => setSpeciesData(data))
       .catch((err) => {
         if (err.name !== "AbortError") {
           console.error("Species info lookup failed:", err);
@@ -261,119 +283,45 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
       .finally(() => setLoading(false));
   }, []);
 
-  const cancelHide = useCallback(() => {
-    if (hideTimeoutRef.current) {
-      clearTimeout(hideTimeoutRef.current);
-      hideTimeoutRef.current = null;
-    }
-  }, []);
+  function handleClick(e) {
+    const hit = hitTest(e.clientX, e.clientY);
+    if (!hit) return;
 
-  const doHide = useCallback(() => {
-    setHoveredLabel(null);
-    setHoveredIsGhost(false);
+    const video = videoRef.current;
+    setCaptureDataUrl(null);
+    setSelectedBox({
+      label: hit.label,
+      ghost: !!hit.ghost,
+      videoTime: hit.videoTime,
+    });
+    fetchSpeciesInfo(hit.label);
+
+    if (video) {
+      video.pause();
+      if (hit.ghost && typeof hit.videoTime === "number") {
+        // The actual rewind: jump back to the exact moment this species
+        // was last seen. Capture only AFTER the seek truly lands (the
+        // 'seeked' event) — grabbing the frame immediately after setting
+        // currentTime can catch the video mid-seek.
+        const onSeeked = () => {
+          video.removeEventListener("seeked", onSeeked);
+          captureCrop(hit);
+        };
+        video.addEventListener("seeked", onSeeked);
+        video.currentTime = hit.videoTime;
+      } else {
+        captureCrop(hit);
+      }
+    }
+  }
+
+  function closeModal() {
+    setSelectedBox(null);
+    setCaptureDataUrl(null);
     setSpeciesData(null);
     setFetchError(null);
-    setTooltipStyle((s) => ({ ...s, visibility: "hidden" }));
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    // Resumes playback from wherever currentTime ended up — if the hover
-    // was on a ghost box, that's the rewound timestamp, so the video
-    // continues forward from the moment the species was last seen.
+    if (abortRef.current) abortRef.current.abort();
     videoRef.current?.play().catch(() => {});
-  }, [videoRef]);
-
-  const scheduleHide = useCallback(() => {
-    cancelHide();
-    hideTimeoutRef.current = setTimeout(doHide, HIDE_DELAY_MS);
-  }, [cancelHide, doHide]);
-
-  function handleMouseMove(e) {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-
-    // A few px of forgiveness around each box — detection boxes are often
-    // a little offset from the actual animal, so requiring an exact
-    // pixel-perfect hover makes the feature feel broken even when it's
-    // working. Remove HIT_PADDING (or the console.debug lines) once
-    // you've confirmed hover detection is firing correctly.
-    const HIT_PADDING = 6;
-    const hit = scaledBoxesRef.current.find(
-      (b) =>
-        mx >= b.bx - HIT_PADDING &&
-        mx <= b.bx + b.bw + HIT_PADDING &&
-        my >= b.by - HIT_PADDING &&
-        my <= b.by + b.bh + HIT_PADDING
-    );
-
-    if (!hit) {
-      if (hoveredLabel !== null) {
-        // Don't hide immediately — give the mouse a moment to reach the
-        // tooltip itself (which sits above/below this box, outside the
-        // hit region). The tooltip's own onMouseEnter cancels this if the
-        // cursor actually lands on it.
-        scheduleHide();
-      }
-      return;
-    }
-
-    // Still hovering a box — cancel any pending hide from a moment ago.
-    cancelHide();
-
-    // Clamp the tooltip's horizontal center so the 256px-wide box can
-    // never render partially under the left/right chrome panels or off
-    // the edge of the viewport, regardless of where the hovered box sits.
-    let clampedX = hit.bx + hit.bw / 2;
-    clampedX = Math.max(TOOLTIP_HALF_WIDTH + LEFT_PANEL_WIDTH + TOOLTIP_EDGE_PADDING, clampedX);
-    clampedX = Math.min(
-      rect.width - TOOLTIP_HALF_WIDTH - RIGHT_PANEL_WIDTH - TOOLTIP_EDGE_PADDING,
-      clampedX
-    );
-
-    anchorRef.current = { x: clampedX, boxTop: hit.by, boxBottom: hit.by + hit.bh };
-    positionTooltip();
-
-    if (hit.label !== hoveredLabel) {
-      console.debug("[DetectionOverlay] hovering box:", hit.label, "ghost:", !!hit.ghost);
-
-      const video = videoRef.current;
-      if (video) {
-        // Pause on any hover — real or ghost — so the framed species
-        // doesn't swim off (or, for a ghost, vanish again) while it's
-        // being read.
-        video.pause();
-        if (hit.ghost && typeof hit.videoTime === "number") {
-          // The actual rewind: jump back to the exact moment this
-          // species was last seen, bringing it back into the box.
-          video.currentTime = hit.videoTime;
-        }
-      }
-
-      setHoveredLabel(hit.label);
-      setHoveredIsGhost(!!hit.ghost);
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-      debounceRef.current = setTimeout(() => fetchSpeciesInfo(hit.label), HOVER_DEBOUNCE_MS);
-    }
-  }
-
-  function handleCanvasMouseLeave() {
-    if (hoveredLabel !== null) {
-      // Same grace period as the no-hit case — the mouse may be headed
-      // straight for the tooltip if it overlaps the canvas edge.
-      scheduleHide();
-    }
-  }
-
-  // The tooltip itself captures pointer events (see pointer-events change
-  // below), so hovering it keeps the whole thing open — including enough
-  // time to actually click "read more".
-  function handleTooltipMouseEnter() {
-    cancelHide();
-  }
-
-  function handleTooltipMouseLeave() {
-    scheduleHide();
   }
 
   return (
@@ -381,97 +329,132 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
       <canvas
         ref={canvasRef}
         className="absolute inset-0 w-full h-full"
-        style={{ pointerEvents: "auto", cursor: hoveredLabel ? "help" : "default" }}
+        style={{ pointerEvents: "auto", cursor: isHoveringBox ? "pointer" : "default" }}
         onMouseMove={handleMouseMove}
-        onMouseLeave={handleCanvasMouseLeave}
+        onMouseLeave={() => setIsHoveringBox(false)}
+        onClick={handleClick}
       />
 
-      {hoveredLabel && (
+      {selectedBox && (
         <div
-          ref={tooltipRef}
-          onMouseEnter={handleTooltipMouseEnter}
-          onMouseLeave={handleTooltipMouseLeave}
-          className="absolute z-20 w-64 -translate-x-1/2 bg-[#1c2226] border border-[#3a444a] rounded-lg px-3 py-2.5 font-mono text-xs max-h-[70vh] overflow-y-auto"
-          style={{
-            left: tooltipStyle.left,
-            top: tooltipStyle.top,
-            visibility: tooltipStyle.visibility,
-          }}
+          className="absolute inset-0 z-30 bg-black/70 pointer-events-auto flex items-center justify-center"
+          onClick={closeModal}
         >
-          <p className="text-[#d3dbe0] font-bold mb-1.5">{hoveredLabel}</p>
-
-          {hoveredIsGhost && (
-            <p className="text-[#a48a55] mb-1.5">⏪ Rewound to last sighting</p>
-          )}
-
-          {loading && <p className="text-[#5a6a72]">Looking up species info…</p>}
-
-          {fetchError && <p className="text-[#c47a6e]">{fetchError}</p>}
-
-          {speciesData && !speciesData.error && (
-            <div className="space-y-1 text-[#b7c4cc]">
-              {speciesData.scientific_name && (
-                <p><span className="text-[#8fa3ad]">Scientific name:</span> {speciesData.scientific_name}</p>
-              )}
-              {speciesData.taxon_rank && (
-                <p><span className="text-[#8fa3ad]">Rank:</span> {speciesData.taxon_rank}</p>
-              )}
-              {speciesData.kingdom && (
-                <p><span className="text-[#8fa3ad]">Kingdom:</span> {speciesData.kingdom}</p>
-              )}
-              {speciesData.summary && (
-                <p className="pt-1">{speciesData.summary}</p>
-              )}
-              <p className="text-[#5a6a72] pt-1.5 border-t border-[#3a444a] mt-1.5">
-                Source: Wikipedia &amp; OBIS
-                {speciesData.wikipedia_url && (
-                  <>
-                    {" · "}
-                    <a
-                      href={speciesData.wikipedia_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="underline hover:text-[#8fa3ad]"
-                    >
-                      read more
-                    </a>
-                  </>
-                )}
-              </p>
-
-              {speciesData.research_papers && speciesData.research_papers.length > 0 && (
-                <div className="pt-1.5 border-t border-[#3a444a] mt-1.5">
-                  <p className="text-[#8fa3ad] mb-1">Related research</p>
-                  <div className="space-y-1.5">
-                    {speciesData.research_papers.map((paper, i) => (
-                      <p key={i} className="leading-snug">
-                        {paper.url ? (
-                          <a
-                            href={paper.url}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="underline hover:text-[#8fa3ad]"
-                          >
-                            {paper.title}
-                          </a>
-                        ) : (
-                          paper.title
-                        )}
-                        {paper.year && <span className="text-[#5a6a72]"> ({paper.year})</span>}
-                        {paper.authors && (
-                          <span className="block text-[10px] text-[#5a6a72]">{paper.authors}</span>
-                        )}
-                      </p>
-                    ))}
-                  </div>
-                </div>
-              )}
+          <div
+            className="w-full max-w-sm max-h-[80vh] overflow-y-auto bg-[#1c2226] border border-[#3a444a] rounded-xl font-mono text-xs"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-[#3a444a] sticky top-0 bg-[#1c2226]">
+              <span className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">
+                Species inspector
+              </span>
+              <button
+                onClick={closeModal}
+                className="text-[#8fa3ad] hover:text-[#d3dbe0] text-sm leading-none"
+              >
+                ✕
+              </button>
             </div>
-          )}
 
-          {speciesData?.error && (
-            <p className="text-[#c47a6e]">{speciesData.error}</p>
-          )}
+            <div className="p-4 space-y-3">
+              {captureDataUrl && (
+                <img
+                  src={captureDataUrl}
+                  alt={`Captured frame of ${selectedBox.label}`}
+                  className="w-full h-40 object-cover rounded-md border border-[#3a444a]"
+                />
+              )}
+
+              <div>
+                <p className="text-[#d3dbe0] font-bold text-sm">{selectedBox.label}</p>
+                {selectedBox.ghost && (
+                  <p className="text-[#a48a55] mt-0.5">⏪ Rewound to last sighting</p>
+                )}
+              </div>
+
+              {loading && <p className="text-[#5a6a72]">Looking up species info…</p>}
+              {fetchError && <p className="text-[#c47a6e]">{fetchError}</p>}
+
+              {speciesData && !speciesData.error && (
+                <>
+                  <div className="space-y-1 text-[#b7c4cc]">
+                    {speciesData.scientific_name && (
+                      <p><span className="text-[#8fa3ad]">Scientific name:</span> {speciesData.scientific_name}</p>
+                    )}
+                    {speciesData.taxon_rank && (
+                      <p><span className="text-[#8fa3ad]">Rank:</span> {speciesData.taxon_rank}</p>
+                    )}
+                    {speciesData.kingdom && (
+                      <p><span className="text-[#8fa3ad]">Kingdom:</span> {speciesData.kingdom}</p>
+                    )}
+                    {speciesData.summary && <p className="pt-1">{speciesData.summary}</p>}
+                  </div>
+
+                  {/* Research diagram — Wikipedia's article image, via
+                      species_info.py's diagram_url field. */}
+                  <div className="pt-1.5 border-t border-[#3a444a]">
+                    <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad] mb-1.5">
+                      Research diagram
+                    </p>
+                    {speciesData.diagram_url ? (
+                      <img
+                        src={speciesData.diagram_url}
+                        alt={`Reference diagram for ${speciesData.scientific_name || selectedBox.label}`}
+                        className="w-full max-h-48 object-contain rounded-md bg-[#0c1113] border border-[#3a444a]"
+                      />
+                    ) : (
+                      <p className="text-[#5a6a72]">No diagram available for this species.</p>
+                    )}
+                  </div>
+
+                  {/* Research papers — real OpenAlex results from
+                      species_info.py, not a placeholder search link. */}
+                  <div className="pt-1.5 border-t border-[#3a444a]">
+                    <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad] mb-1.5">
+                      Research papers
+                    </p>
+                    {speciesData.research_papers?.length > 0 ? (
+                      <ul className="space-y-2">
+                        {speciesData.research_papers.map((paper, i) => (
+                          <li key={i}>
+                            <a
+                              href={paper.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[#b7c4cc] hover:text-[#d3dbe0] underline"
+                            >
+                              {paper.title}
+                            </a>
+                            <p className="text-[#5a6a72]">
+                              {[paper.authors, paper.year].filter(Boolean).join(" · ")}
+                            </p>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-[#5a6a72]">No related papers found.</p>
+                    )}
+                  </div>
+
+                  {speciesData.wikipedia_url && (
+                    <p className="text-[#5a6a72] pt-1.5 border-t border-[#3a444a]">
+                      Source: Wikipedia &amp; OBIS ·{" "}
+                      <a
+                        href={speciesData.wikipedia_url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline hover:text-[#8fa3ad]"
+                      >
+                        read more
+                      </a>
+                    </p>
+                  )}
+                </>
+              )}
+
+              {speciesData?.error && <p className="text-[#c47a6e]">{speciesData.error}</p>}
+            </div>
+          </div>
         </div>
       )}
     </div>

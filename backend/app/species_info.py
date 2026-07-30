@@ -148,6 +148,14 @@ async def get_species_info(species_name: str) -> dict:
             data["wikipedia_url"] = (
                 wiki.get("content_urls", {}).get("desktop", {}).get("page")
             )
+            # Wikipedia's summary API already includes an image if the
+            # article has one — "originalimage" (full-res) is preferred
+            # over "thumbnail" (Wikipedia's smaller default crop) when
+            # both are present, since it renders better at the modal's
+            # larger display size.
+            image = wiki.get("originalimage") or wiki.get("thumbnail")
+            if image and image.get("source"):
+                data["diagram_url"] = image["source"]
 
         # OBIS taxon match — free, no API key required, and the same
         # source your bathymetry map's species markers already rely on.
