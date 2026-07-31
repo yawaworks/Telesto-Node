@@ -1,93 +1,134 @@
-# Telesto Node — Starter Scaffold
+# Telesto Node
 
-Real-Time Marine Ecosystem Monitoring & Health Analytics. This scaffold matches
-the architecture in the hackathon plan: a FastAPI/YOLO inference backend and a
-Next.js/Tailwind/Mapbox mission-control frontend.
+Real-time marine ecosystem monitoring and health analytics platform, combining live ROV mission control, gamepad-driven navigation, computer-vision species detection, and 3D bathymetry mapping in one live dashboard.
 
-## Folder layout
+Started as a hackathon project, but built out end-to-end as a real system rather than cut down for speed. Its core differentiator is a live, immersive real-time ROV mission-control UX with gamepad navigation, something none of the existing marine research tools (ReefCloud, CoralNet, FathomNet, VIAME, Reef Support, Data Mermaid, FathomVerse) currently offer.
 
-```
-Telesto Node/
-├── backend/
-│   ├── app/
-│   │   ├── main.py           # FastAPI app: /analyze-frame, /ws/telemetry
-│   │   ├── inference.py      # CLAHE + YOLO model loader
-│   │   ├── local_inference.py# Standalone webcam/video test script
-│   │   └── obis_client.py    # OBIS species data extractor
-│   ├── weights/               # Drop your fine-tuned .pt weights here
-│   ├── requirements.txt
-│   └── .env.example
-└── frontend/
-    ├── app/
-    │   ├── layout.js
-    │   ├── page.js             # HUD mission-control screen
-    │   └── globals.css
-    ├── lib/
-    │   ├── gamepad-controller.js
-    │   └── mapbox-setup.js
-    ├── package.json
-    ├── tailwind.config.js
-    └── .env.local.example
-```
+---
 
-## 1. Move this into place
+## Features
 
-Unzip this scaffold's contents directly into your existing **Telesto Node**
-folder on the Desktop, so you end up with `Telesto Node/backend` and
-`Telesto Node/frontend` side by side.
+- **Live ROV Mission Control**: real-time video feed, telemetry readout, and gamepad-driven navigation for an immersive piloting experience
+- **Species Detection**: YOLO-based computer vision (Roboflow-hosted) identifies marine species live from the video feed
+- **Coral Bleach Classification**: a dedicated model flags signs of coral bleaching in real time
+- **3D Bathymetry Mapping**: MapLibre GL JS renders live 3D seafloor terrain
+- **Discovery Snapshot**: capture and save a notable moment mid-dive with one gamepad button press
+- **Clip Library**: save, browse, and share video clips (personal and shared), backed by Cloudinary and MongoDB
+- **Automated Detection Alerts**: an n8n workflow emails researchers when a high-confidence species detection occurs, with a per-species cooldown to avoid alert spam
+- **Ocean Temperature Overlay**: live sea surface temperature via the Open-Meteo marine API
+- **Secure Auth**: Google OAuth and credentials-based login via NextAuth.js
 
-## 2. Backend setup (FastAPI + YOLO)
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | Next.js 14, deployed on Vercel |
+| Backend | FastAPI (Python), deployed on Render |
+| Database | MongoDB Atlas (M0 free tier), via Motor (async driver) |
+| Auth | NextAuth.js (Google OAuth and bcryptjs credentials) |
+| Media Storage | Cloudinary |
+| Computer Vision | Roboflow-hosted YOLO models: species detection and coral bleach classifier |
+| Mapping | MapLibre GL JS (CDN), OpenFreeMap liberty style, free terrain-DEM tiles |
+| Ocean Data | Open-Meteo marine API (SST, cached 10 min) |
+| Automation | n8n Cloud (detection alerts, scheduled species-data sync) |
+| Species Data | OBIS, iNaturalist |
+| Email | Resend |
+| Rate Limiting | slowapi |
+| PDF Export | reportlab |
+| API Testing | Postman |
+
+---
+
+## Architecture Notes
+
+- n8n talks to the backend, never directly to the database. All database writes from n8n workflows go through internal FastAPI endpoints protected by a shared secret header (`x-sync-secret`), keeping MongoDB credentials out of the automation layer.
+- Detection alert pipeline: webhook receives the event, checks confidence is above 0.7, formats the alert, sends an email via Resend, then responds to the webhook. A 5-minute per-species cooldown in the backend prevents duplicate alerts from consecutive video frames.
+- MapLibre GL JS is loaded via CDN, not npm. Bundling it through webpack silently breaks its internal Web Worker for tile parsing.
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js (for the frontend)
+- Python 3.12.10 specifically. Newer versions (e.g. 3.14) break prebuilt numpy/PyTorch wheels
+- A MongoDB Atlas cluster
+- Roboflow, Cloudinary, and Resend accounts (for full functionality)
+
+### Backend
 
 ```bash
-cd "Telesto Node/backend"
-python3 -m venv venv
-source venv/bin/activate        # Windows: venv\Scripts\activate
+cd backend
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env            # fill in Mongo/Cloudinary/GFW keys as you get them
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 5050
 ```
 
-Check it's alive: open http://localhost:8000/health → `{"status": "ok"}`.
+Run uvicorn from inside `backend/`, not the project root. Kill any stale Python processes first if you hit unexplained inference errors.
 
-Until your fine-tuned marine weights (Roboflow export) are ready, the model
-loader automatically falls back to stock `yolov8n.pt` so the endpoint works
-out of the box for early integration testing.
+Create a `.env` file in `backend/` with:
 
-## 3. Frontend setup (Next.js + Tailwind + Mapbox)
+```
+MONGODB_URI=
+ROBOFLOW_API_KEY=
+CLOUDINARY_URL=
+N8N_DETECTION_WEBHOOK_URL=
+ALLOWED_VIDEO_HOSTS=res.cloudinary.com
+```
+
+### Frontend
 
 ```bash
-cd "Telesto Node/frontend"
+cd frontend
 npm install
-cp .env.local.example .env.local   # add your Mapbox public token
 npm run dev
 ```
 
-Open http://localhost:3000 → you should see the dark-mode HUD with depth,
-coordinates, temp/salinity/heading badges, the pulsing reticle, and CRT
-scanlines. Plug in an Xbox/PS controller to test camera + scrubbing controls.
+Create a `.env.local` file in `frontend/` with:
 
-## 4. Wire frontend → backend
+```
+MONGODB_URI=
+NEXTAUTH_SECRET=
+NEXTAUTH_URL=http://localhost:3000
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+NEXT_PUBLIC_BACKEND_URL=http://localhost:5050
+```
 
-In `frontend/app/page.js` (or a new component), POST captured video frames as
-`multipart/form-data` to `${NEXT_PUBLIC_API_BASE_URL}/analyze-frame` and draw
-the returned bounding boxes over the `<video>` element with a `<canvas>` overlay.
+---
 
-## 5. Suggested build order (matches the 36-hour roadmap)
+## Project Structure
 
-1. **Hours 0–6:** Get `/analyze-frame` returning real boxes from a Roboflow-exported
-   YOLO checkpoint dropped into `backend/weights/`.
-2. **Hours 6–14:** Wire `coral_bleaching_ratio()` in `inference.py` into the
-   response, and get `obis_client.py` pulling live species coordinates.
-3. **Hours 14–26:** Flesh out the HUD, plug in real Mapbox terrain/fog, and
-   get the gamepad hooked to both video scrubbing and map pitch/bearing.
-4. **Hours 26–36:** Record your three demo clips (healthy reef / bleaching /
-   invasive outbreak), add the PDF export button, and rehearse the pitch.
+```
+telesto-node/
+├── frontend/          Next.js app (mission control UI, auth, clip library, map)
+├── backend/           FastAPI service (inference, alerts, telemetry, sync endpoints)
+│   ├── app/
+│   ├── validate_model.py    confidence-threshold sweep against labeled ground truth
+│   └── assisted_label.py    semi-assisted labeling tool
+└── README.md
+```
 
-## Auth / DB / hosting (per the plan's free stack)
+---
 
-- **Auth:** NextAuth.js — `npm install next-auth` in `frontend/`, add an API route
-  under `frontend/app/api/auth/[...nextauth]/route.js` when you're ready.
-- **Database:** MongoDB Atlas free M0 tier — put the connection string in
-  `backend/.env` as `MONGODB_URI`.
-- **Media storage:** Cloudinary free tier for ROV clips/snapshots.
-- **Hosting:** Vercel (frontend), Render (backend/FastAPI).
+## Known Limitations
+
+This project is being built with research credibility in mind, so these are tracked openly rather than glossed over:
+
+- Telemetry (depth, salinity, heading) is currently simulated, not from real sensors. GPS coordinates and temperature are real. The UI is being updated to visually distinguish measured vs. simulated data.
+- Model accuracy has not yet been benchmarked against a labeled ground-truth set. Tooling (`validate_model.py`, `assisted_label.py`) exists, but the actual labeling pass is deferred.
+- No standardized data export format yet for researchers.
+
+---
+
+## Roadmap
+
+- [ ] Complete OBIS/iNaturalist scheduled species-data sync via n8n
+- [ ] Run a labeled validation batch and publish real accuracy metrics
+- [ ] Replace simulated telemetry with real sensor data
+- [ ] Add an "unvalidated model" tag to detection confidence scores in the UI
+- [ ] Standardized data export format for researchers
