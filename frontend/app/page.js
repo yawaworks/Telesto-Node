@@ -44,6 +44,11 @@ export default function MissionControl() {
 
   const [speciesQuery, setSpeciesQuery] = useState(DEFAULT_SPECIES);
   const [viewMode, setViewMode] = useState("video");
+  // Telemetry and action panels default closed so phones start with an
+  // unobstructed feed; sm:flex below forces them open on tablet/desktop
+  // regardless of this state.
+  const [telemetryOpen, setTelemetryOpen] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
   const [exportingReport, setExportingReport] = useState(false);
   const [emailingReport, setEmailingReport] = useState(false);
   const [emailReportMessage, setEmailReportMessage] = useState(null);
@@ -458,31 +463,33 @@ export default function MissionControl() {
         }}
       />
 
-      <div className="absolute top-0 left-0 right-0 h-14 flex items-center justify-between px-4 bg-[#1c2226]/90 border-b border-[#3a444a] pointer-events-auto">
-        <div className="flex gap-2">
+      <div className="absolute top-0 left-0 right-0 h-14 flex items-center justify-between gap-1 px-2 sm:px-4 bg-[#1c2226]/90 border-b border-[#3a444a] pointer-events-auto overflow-x-auto">
+        <div className="flex gap-1 sm:gap-2 shrink-0">
           <button
             onClick={() => setViewMode("video")}
-            className={`border rounded-lg px-3 py-1.5 text-xs uppercase tracking-widest ${
+            className={`border rounded-lg px-2 sm:px-3 py-1.5 text-[10px] sm:text-xs uppercase tracking-widest whitespace-nowrap ${
               !isMapMode
                 ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
                 : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
             }`}
           >
-            ROV feed
+            <span className="sm:hidden">Feed</span>
+            <span className="hidden sm:inline">ROV feed</span>
           </button>
           <button
             onClick={() => setViewMode("map")}
-            className={`border rounded-lg px-3 py-1.5 text-xs uppercase tracking-widest ${
+            className={`border rounded-lg px-2 sm:px-3 py-1.5 text-[10px] sm:text-xs uppercase tracking-widest whitespace-nowrap ${
               isMapMode
                 ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
                 : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
             }`}
           >
-            Bathymetry map
+            <span className="sm:hidden">Map</span>
+            <span className="hidden sm:inline">Bathymetry map</span>
           </button>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="hidden sm:flex items-center gap-2 shrink-0">
           {!isMapMode ? (
             <>
               <span
@@ -511,11 +518,33 @@ export default function MissionControl() {
           )}
         </div>
 
-        <div className="flex items-center gap-3">
-          <span className="text-xs text-[#8fa3ad]">{session?.user?.email || session?.user?.name}</span>
+        <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+          <button
+            onClick={() => setTelemetryOpen((v) => !v)}
+            className={`sm:hidden border rounded-lg px-2 py-1.5 text-[10px] uppercase tracking-widest whitespace-nowrap ${
+              telemetryOpen
+                ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
+                : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc]"
+            }`}
+          >
+            Data
+          </button>
+          <button
+            onClick={() => setActionsOpen((v) => !v)}
+            className={`sm:hidden border rounded-lg px-2 py-1.5 text-[10px] uppercase tracking-widest whitespace-nowrap ${
+              actionsOpen
+                ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
+                : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc]"
+            }`}
+          >
+            Actions
+          </button>
+          <span className="hidden sm:inline text-xs text-[#8fa3ad] max-w-[180px] truncate">
+            {session?.user?.email || session?.user?.name}
+          </span>
           <button
             onClick={() => signOut({ callbackUrl: "/login" })}
-            className="text-xs uppercase tracking-widest text-[#c47a6e] hover:text-[#d99a8f]"
+            className="text-[10px] sm:text-xs uppercase tracking-widest text-[#c47a6e] hover:text-[#d99a8f] whitespace-nowrap"
           >
             Sign out
           </button>
@@ -525,49 +554,62 @@ export default function MissionControl() {
       {isMapMode && (
         <form
           onSubmit={handleSpeciesSearch}
-          className="absolute top-[68px] left-1/2 -translate-x-1/2 pointer-events-auto flex gap-2"
+          className="absolute top-[68px] left-1/2 -translate-x-1/2 pointer-events-auto flex gap-2 px-2 w-full max-w-xs sm:w-auto sm:max-w-none justify-center"
         >
           <input
             type="text"
             value={speciesQuery}
             onChange={(e) => setSpeciesQuery(e.target.value)}
-            placeholder="Scientific name (e.g. Acropora cervicornis)"
-            className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-1 text-xs text-[#d3dbe0] placeholder:text-[#5a6a72] outline-none focus:border-[#8fa3ad] w-64"
+            placeholder="Scientific name…"
+            className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-1 text-xs text-[#d3dbe0] placeholder:text-[#5a6a72] outline-none focus:border-[#8fa3ad] w-full sm:w-64 min-w-0"
           />
           <button
             type="submit"
-            className="bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-1 text-xs uppercase tracking-widest hover:bg-[#8fa3ad]/20"
+            className="shrink-0 bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-1 text-xs uppercase tracking-widest hover:bg-[#8fa3ad]/20"
           >
             Plot
           </button>
         </form>
       )}
 
-      <div className="absolute top-[70px] left-4 w-56 bg-[#1c2226]/90 border border-[#3a444a] rounded-xl divide-y divide-[#3a444a] pointer-events-none">
-        <div className="px-4 py-2.5">
+      <div
+        className={`absolute top-[60px] sm:top-[70px] left-2 sm:left-4 w-48 sm:w-56 max-h-[calc(100vh-140px)] overflow-y-auto bg-[#1c2226]/95 sm:bg-[#1c2226]/90 border border-[#3a444a] rounded-xl divide-y divide-[#3a444a] pointer-events-auto sm:pointer-events-none z-20 ${
+          telemetryOpen ? "block" : "hidden"
+        } sm:block`}
+      >
+        <div className="flex sm:hidden items-center justify-between px-3 py-1.5 border-b border-[#3a444a]">
+          <span className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">Telemetry</span>
+          <button
+            onClick={() => setTelemetryOpen(false)}
+            className="pointer-events-auto text-[#8fa3ad] hover:text-[#d3dbe0] text-xs px-1"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="px-3 sm:px-4 py-2 sm:py-2.5">
           <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">Coordinates · measured</p>
           <p className="text-sm">{telemetry.coords}</p>
         </div>
-        <div className="px-4 py-2.5">
+        <div className="px-3 sm:px-4 py-2 sm:py-2.5">
           <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">
             Temp · {telemetry.tempSource === "live" ? "measured" : "—"}
           </p>
           <p className="text-lg font-bold">{telemetry.temp}</p>
         </div>
-        <div className="px-4 py-2.5">
+        <div className="px-3 sm:px-4 py-2 sm:py-2.5">
           <p className="text-[10px] uppercase tracking-widest text-[#a48a55]">Depth · simulated</p>
           <p className="text-lg font-bold">{telemetry.depth}</p>
         </div>
-        <div className="px-4 py-2.5">
+        <div className="px-3 sm:px-4 py-2 sm:py-2.5">
           <p className="text-[10px] uppercase tracking-widest text-[#a48a55]">Salinity · simulated</p>
           <p className="text-sm border-b border-dashed border-[#a48a55] inline-block">{telemetry.salinity}</p>
         </div>
-        <div className="px-4 py-2.5">
+        <div className="px-3 sm:px-4 py-2 sm:py-2.5">
           <p className="text-[10px] uppercase tracking-widest text-[#a48a55]">Heading · simulated</p>
           <p className="text-sm border-b border-dashed border-[#a48a55] inline-block">{telemetry.heading}</p>
         </div>
         {!isMapMode && coralBleachingRatio !== null && (
-          <div className="px-4 py-2.5">
+          <div className="px-3 sm:px-4 py-2 sm:py-2.5">
             <p className="text-[10px] uppercase tracking-widest text-[#d8b877]">Coral · unvalidated model</p>
             <p className={`text-sm ${alert ? "text-[#d8b877]" : ""}`}>
               {(coralBleachingRatio * 100).toFixed(0)}% bleached
@@ -589,7 +631,20 @@ export default function MissionControl() {
         </div>
       )}
 
-      <div className="absolute top-[70px] right-4 w-48 flex flex-col gap-2 pointer-events-none">
+      <div
+        className={`absolute top-[60px] sm:top-[70px] right-2 sm:right-4 w-44 sm:w-48 flex-col gap-2 pointer-events-none z-20 ${
+          actionsOpen ? "flex" : "hidden"
+        } sm:flex`}
+      >
+        <div className="flex sm:hidden items-center justify-between bg-[#1c2226]/95 border border-[#3a444a] rounded-lg px-3 py-1.5 pointer-events-auto">
+          <span className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">Actions</span>
+          <button
+            onClick={() => setActionsOpen(false)}
+            className="text-[#8fa3ad] hover:text-[#d3dbe0] text-xs px-1"
+          >
+            ✕
+          </button>
+        </div>
         <button
           onClick={handleDiscoverySnapshot}
           className="pointer-events-auto bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20"
@@ -636,22 +691,39 @@ export default function MissionControl() {
         )}
       </div>
 
+      {/* Mobile-only fallback: shows the toast even when the actions drawer is closed */}
+      {activeToast && !actionsOpen && (
+        <div className="sm:hidden absolute bottom-16 left-1/2 -translate-x-1/2 pointer-events-auto z-30 max-w-[90vw]">
+          <div
+            className={`rounded-lg px-3 py-2 text-[11px] border whitespace-nowrap ${
+              activeToast.type === "success"
+                ? "bg-[#8fa3ad]/10 border-[#8fa3ad]/50 text-[#b7c4cc]"
+                : activeToast.type === "error"
+                ? "bg-[#c47a6e]/10 border-[#c47a6e]/50 text-[#d99a8f]"
+                : "bg-white/[0.04] border-[#3a444a] text-[#d3dbe0]"
+            }`}
+          >
+            {activeToast.text}
+          </div>
+        </div>
+      )}
+
       {!isMapMode && alert && (
-        <div className="absolute bottom-20 right-4 bg-[#a48a55]/10 border border-[#b38d47] text-[#d8b877] rounded-xl px-4 py-2 text-xs">
+        <div className="absolute bottom-28 sm:bottom-20 left-2 right-2 sm:left-auto sm:right-4 text-center sm:text-left bg-[#a48a55]/10 border border-[#b38d47] text-[#d8b877] rounded-xl px-3 sm:px-4 py-2 text-[11px] sm:text-xs">
           Possible bleaching — unverified
         </div>
       )}
 
       {!isMapMode && (
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-16 h-16 border border-[#8fa3ad]/60 rounded-full animate-pulse pointer-events-none" />
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-10 h-10 sm:w-16 sm:h-16 border border-[#8fa3ad]/60 rounded-full animate-pulse pointer-events-none" />
       )}
 
       {!isMapMode && (
-        <div className="absolute bottom-0 left-0 right-0 bg-[#1c2226]/90 border-t border-[#3a444a] px-4 py-3 pointer-events-auto">
-          <div className="flex flex-wrap items-center gap-2">
+        <div className="absolute bottom-0 left-0 right-0 bg-[#1c2226]/90 border-t border-[#3a444a] px-2 sm:px-4 py-2 sm:py-3 pointer-events-auto max-h-[45vh] sm:max-h-none overflow-y-auto">
+          <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
             <button
               onClick={handleUseDefaultClip}
-              className={`border rounded-lg px-3 py-1.5 text-[10px] uppercase tracking-widest ${
+              className={`border rounded-lg px-2 sm:px-3 py-1 sm:py-1.5 text-[9px] sm:text-[10px] uppercase tracking-widest whitespace-nowrap ${
                 videoSourceMode === "default"
                   ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
                   : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
@@ -661,7 +733,7 @@ export default function MissionControl() {
             </button>
             <button
               onClick={handleUploadClick}
-              className={`border rounded-lg px-3 py-1.5 text-[10px] uppercase tracking-widest ${
+              className={`border rounded-lg px-2 sm:px-3 py-1 sm:py-1.5 text-[9px] sm:text-[10px] uppercase tracking-widest whitespace-nowrap ${
                 videoSourceMode === "upload"
                   ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
                   : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
@@ -671,7 +743,7 @@ export default function MissionControl() {
             </button>
             <button
               onClick={handleUseWebcam}
-              className={`border rounded-lg px-3 py-1.5 text-[10px] uppercase tracking-widest ${
+              className={`border rounded-lg px-2 sm:px-3 py-1 sm:py-1.5 text-[9px] sm:text-[10px] uppercase tracking-widest whitespace-nowrap ${
                 videoSourceMode === "webcam"
                   ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
                   : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
@@ -680,17 +752,17 @@ export default function MissionControl() {
               Use webcam
             </button>
 
-            <form onSubmit={handleUseVideoUrl} className="flex gap-2 ml-1">
+            <form onSubmit={handleUseVideoUrl} className="flex gap-1.5 sm:gap-2 w-full sm:w-auto sm:ml-1">
               <input
                 type="text"
                 value={videoUrlInput}
                 onChange={(e) => setVideoUrlInput(e.target.value)}
                 placeholder="Paste a direct .mp4 video URL…"
-                className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-2 py-1.5 text-[10px] placeholder:text-[#5a6a72] outline-none focus:border-[#8fa3ad] w-56"
+                className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-2 py-1 sm:py-1.5 text-[9px] sm:text-[10px] placeholder:text-[#5a6a72] outline-none focus:border-[#8fa3ad] flex-1 min-w-0 sm:flex-none sm:w-56"
               />
               <button
                 type="submit"
-                className={`border rounded-lg px-3 py-1.5 text-[10px] uppercase tracking-widest ${
+                className={`shrink-0 border rounded-lg px-2 sm:px-3 py-1 sm:py-1.5 text-[9px] sm:text-[10px] uppercase tracking-widest whitespace-nowrap ${
                   videoSourceMode === "url"
                     ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
                     : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
@@ -701,8 +773,8 @@ export default function MissionControl() {
             </form>
 
             {videoSourceMode === "upload" && uploadedFile && (
-              <div className="flex items-center gap-2 bg-white/[0.04] border border-[#3a444a] rounded-lg px-2 py-1.5 ml-1">
-                <label className="flex items-center gap-1 text-[10px] text-[#b7c4cc] cursor-pointer">
+              <div className="flex items-center gap-2 bg-white/[0.04] border border-[#3a444a] rounded-lg px-2 py-1 sm:py-1.5 sm:ml-1">
+                <label className="flex items-center gap-1 text-[9px] sm:text-[10px] text-[#b7c4cc] cursor-pointer whitespace-nowrap">
                   <input
                     type="checkbox"
                     checked={shareClip}
@@ -714,7 +786,7 @@ export default function MissionControl() {
                 <button
                   onClick={handleSaveToLibrary}
                   disabled={savingClip}
-                  className="text-[10px] uppercase tracking-widest text-[#8fa3ad] hover:text-[#d3dbe0] disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="text-[9px] sm:text-[10px] uppercase tracking-widest text-[#8fa3ad] hover:text-[#d3dbe0] disabled:opacity-50 disabled:cursor-not-allowed whitespace-nowrap"
                 >
                   {savingClip ? "Saving…" : "Save to library"}
                 </button>
@@ -723,7 +795,7 @@ export default function MissionControl() {
 
             {clipSaveMessage && (
               <span
-                className={`text-[10px] rounded px-2 py-1 ${
+                className={`text-[9px] sm:text-[10px] rounded px-2 py-1 ${
                   clipSaveMessage.type === "success" ? "text-[#8fa3ad]" : "text-[#c47a6e]"
                 }`}
               >
@@ -732,7 +804,7 @@ export default function MissionControl() {
             )}
 
             {(webcamError || (videoLoadError && videoSourceMode !== "url")) && (
-              <span className="text-[10px] text-[#c47a6e]">
+              <span className="text-[9px] sm:text-[10px] text-[#c47a6e]">
                 {webcamError ||
                   (videoSourceMode === "default"
                     ? "Default clip failed to load — check frontend/public/rov-feed.mp4 exists"
@@ -744,8 +816,8 @@ export default function MissionControl() {
       )}
 
       {libraryOpen && (
-        <div className="absolute inset-0 bg-black/70 pointer-events-auto flex items-center justify-center">
-          <div className="w-full max-w-md max-h-[70vh] flex flex-col bg-[#1c2226] border border-[#3a444a] rounded-xl overflow-hidden">
+        <div className="absolute inset-0 bg-black/70 pointer-events-auto flex items-center justify-center p-3 sm:p-0">
+          <div className="w-full max-w-md max-h-[85vh] sm:max-h-[70vh] flex flex-col bg-[#1c2226] border border-[#3a444a] rounded-xl overflow-hidden">
             <div className="flex items-center justify-between px-4 py-3 border-b border-[#3a444a]">
               <span className="text-xs uppercase tracking-widest text-[#8fa3ad]">Clip library</span>
               <button

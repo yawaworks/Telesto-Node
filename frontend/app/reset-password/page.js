@@ -48,7 +48,7 @@ function ResetPasswordForm() {
 
   if (!token || !email) {
     return (
-      <div className="min-h-screen bg-[#171d20] text-[#d3dbe0] flex items-center justify-center font-mono">
+      <div className="min-h-screen bg-[#171d20] text-[#d3dbe0] flex items-center justify-center font-mono px-4">
         <div className="w-full max-w-sm bg-[#1c2226] border border-[#3a444a] rounded-xl p-8 text-center">
           <p className="text-sm text-[#d8877a]">Invalid reset link.</p>
           <Link href="/forgot-password" className="text-xs text-[#8fa3ad] hover:text-[#d3dbe0] mt-4 block">
@@ -60,7 +60,7 @@ function ResetPasswordForm() {
   }
 
   return (
-    <div className="min-h-screen bg-[#171d20] text-[#d3dbe0] flex items-center justify-center font-mono">
+    <div className="min-h-screen bg-[#171d20] text-[#d3dbe0] flex items-center justify-center font-mono px-4">
       <div className="w-full max-w-sm bg-[#1c2226] border border-[#3a444a] rounded-xl p-8">
         <h1 className="text-xl font-bold mb-1 text-[#d3dbe0]">Set new password</h1>
         <p className="text-xs text-[#8fa3ad] mb-6">for {email}</p>
@@ -104,7 +104,7 @@ export default function ResetPasswordPage() {
   return (
     <Suspense
       fallback={
-        <div className="min-h-screen bg-[#171d20] text-[#d3dbe0] flex items-center justify-center font-mono">
+        <div className="min-h-screen bg-[#171d20] text-[#d3dbe0] flex items-center justify-center font-mono px-4">
           <p className="text-sm text-[#8fa3ad]">Loading…</p>
         </div>
       }

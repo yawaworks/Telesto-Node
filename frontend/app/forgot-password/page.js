@@ -33,7 +33,7 @@ export default function ForgotPasswordPage() {
   }
 
   return (
-    <div className="min-h-screen bg-[#171d20] text-[#d3dbe0] flex items-center justify-center font-mono">
+    <div className="min-h-screen bg-[#171d20] text-[#d3dbe0] flex items-center justify-center font-mono px-4">
       <div className="w-full max-w-sm bg-[#1c2226] border border-[#3a444a] rounded-xl p-8">
         <h1 className="text-xl font-bold mb-1 text-[#d3dbe0]">Reset password</h1>
         <p className="text-xs text-[#8fa3ad] mb-6">
