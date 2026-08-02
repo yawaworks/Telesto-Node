@@ -210,6 +210,7 @@ class SnapshotListItem(BaseModel):
     species_query: str
     owner_email: str
     annotated: bool = False
+    shared: bool = False
 
 
 class ClipResponse(BaseModel):
@@ -352,6 +353,7 @@ async def create_snapshot(
     species_query: str = "",
     owner_email: str = "",
     annotated: bool = False,
+    shared: bool = False,
 ):
     """Uploads a Discovery Snapshot (triggered by the gamepad's 'A' button,
     or saved from the annotation editor) to Cloudinary, then logs a record
@@ -385,6 +387,7 @@ async def create_snapshot(
                     "species_query": species_query,
                     "owner_email": owner_email,
                     "annotated": annotated,
+                    "shared": shared,
                 }
             )
             saved_to_db = True
@@ -420,18 +423,22 @@ async def count_snapshots(request: Request, owner_email: str):
 
 @app.get("/snapshots", response_model=List[SnapshotListItem])
 @limiter.limit("60/minute")
-async def list_snapshots(request: Request, owner_email: str):
-    """Returns a researcher's own Discovery Snapshots for the profile
-    gallery. Snapshots are personal only — unlike clips, there's no
-    team-shared view for them."""
-    if not owner_email:
-        raise HTTPException(status_code=400, detail="owner_email is required")
-
+async def list_snapshots(request: Request, scope: str = "mine", owner_email: str = ""):
+    """scope="mine" returns only this researcher's own snapshots (requires
+    owner_email). scope="shared" returns every snapshot anyone has marked
+    shared, regardless of who's asking — same pattern as /clips."""
     db = get_db()
     if db is None:
         return []
 
-    docs = db["snapshots"].find({"owner_email": owner_email}).sort("captured_at", -1).limit(200)
+    if scope == "shared":
+        query = {"shared": True}
+    else:
+        if not owner_email:
+            raise HTTPException(status_code=400, detail="owner_email is required for scope=mine")
+        query = {"owner_email": owner_email}
+
+    docs = db["snapshots"].find(query).sort("captured_at", -1).limit(200)
     return [
         SnapshotListItem(
             id=str(doc["_id"]),
@@ -441,6 +448,7 @@ async def list_snapshots(request: Request, owner_email: str):
             species_query=doc.get("species_query", ""),
             owner_email=doc.get("owner_email", ""),
             annotated=doc.get("annotated", False),
+            shared=doc.get("shared", False),
         )
         for doc in docs
     ]

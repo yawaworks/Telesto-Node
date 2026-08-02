@@ -81,7 +81,9 @@ export default function MissionControl() {
   const [annotatorExistingId, setAnnotatorExistingId] = useState(null);
 
   const [snapshotLibraryOpen, setSnapshotLibraryOpen] = useState(false);
-  const [snapshots, setSnapshots] = useState([]);
+  const [snapshotLibraryScope, setSnapshotLibraryScope] = useState("mine");
+  const [mySnapshots, setMySnapshots] = useState([]);
+  const [sharedSnapshots, setSharedSnapshots] = useState([]);
   const [snapshotLibraryLoading, setSnapshotLibraryLoading] = useState(false);
 
   const { boxes, ghostBoxes, coralBleachingRatio, status } = useFrameDetection(videoRef, {
@@ -259,14 +261,18 @@ export default function MissionControl() {
     fetchClips(libraryScope);
   }
 
-  async function fetchSnapshots() {
+  async function fetchSnapshots(scope) {
     setSnapshotLibraryLoading(true);
     try {
-      const params = new URLSearchParams({ owner_email: session?.user?.email || "" });
+      const params = new URLSearchParams({ scope });
+      if (scope === "mine") params.set("owner_email", session?.user?.email || "");
+
       const response = await fetch(`${API_BASE_URL}/snapshots?${params}`);
       if (!response.ok) throw new Error(`Failed to load snapshots: ${response.status}`);
       const data = await response.json();
-      setSnapshots(data);
+
+      if (scope === "shared") setSharedSnapshots(data);
+      else setMySnapshots(data);
     } catch (err) {
       console.error("Failed to load snapshot library:", err);
     } finally {
@@ -276,7 +282,13 @@ export default function MissionControl() {
 
   function handleOpenSnapshotLibrary() {
     setSnapshotLibraryOpen(true);
-    fetchSnapshots();
+    fetchSnapshots(snapshotLibraryScope);
+  }
+
+  function handleSwitchSnapshotScope(scope) {
+    setSnapshotLibraryScope(scope);
+    const alreadyLoaded = scope === "mine" ? mySnapshots.length > 0 : sharedSnapshots.length > 0;
+    if (!alreadyLoaded) fetchSnapshots(scope);
   }
 
   function handleViewSnapshot(snapshot) {
@@ -289,13 +301,15 @@ export default function MissionControl() {
   }
 
   function handleSnapshotSaved() {
-    // A newly-saved (or re-annotated) snapshot should show up next time
-    // the gallery is opened, and nudge the count on the profile page.
-    if (snapshotLibraryOpen) fetchSnapshots();
+    // A newly-saved (or re-annotated, or team-shared) snapshot should show
+    // up next time the gallery is opened, and nudge the count on the
+    // profile page.
+    if (snapshotLibraryOpen) fetchSnapshots(snapshotLibraryScope);
   }
 
   function handleSnapshotDeleted(id) {
-    setSnapshots((prev) => prev.filter((s) => s.id !== id));
+    setMySnapshots((prev) => prev.filter((s) => s.id !== id));
+    setSharedSnapshots((prev) => prev.filter((s) => s.id !== id));
   }
 
   function handleSwitchLibraryScope(scope) {
@@ -952,20 +966,45 @@ export default function MissionControl() {
               </button>
             </div>
 
+            <div className="flex gap-2 px-4 pt-3">
+              <button
+                onClick={() => handleSwitchSnapshotScope("mine")}
+                className={`flex-1 rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest border ${
+                  snapshotLibraryScope === "mine"
+                    ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
+                    : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
+                }`}
+              >
+                Mine
+              </button>
+              <button
+                onClick={() => handleSwitchSnapshotScope("shared")}
+                className={`flex-1 rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest border ${
+                  snapshotLibraryScope === "shared"
+                    ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60"
+                    : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
+                }`}
+              >
+                Team
+              </button>
+            </div>
+
             <div className="flex-1 overflow-y-auto p-3">
               {snapshotLibraryLoading && (
                 <span className="text-[10px] text-[#5a6a72] uppercase tracking-widest">
                   Loading…
                 </span>
               )}
-              {!snapshotLibraryLoading && snapshots.length === 0 && (
-                <span className="text-[10px] text-[#5a6a72]">
-                  No snapshots yet — press the gamepad's A button or hit "Snapshot" during a live
-                  session.
-                </span>
-              )}
+              {!snapshotLibraryLoading &&
+                (snapshotLibraryScope === "mine" ? mySnapshots : sharedSnapshots).length === 0 && (
+                  <span className="text-[10px] text-[#5a6a72]">
+                    {snapshotLibraryScope === "mine"
+                      ? "No snapshots yet — press the gamepad's A button or hit \"Snapshot\" during a live session."
+                      : "No team snapshots yet."}
+                  </span>
+                )}
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                {snapshots.map((snap) => (
+                {(snapshotLibraryScope === "mine" ? mySnapshots : sharedSnapshots).map((snap) => (
                   <button
                     key={snap.id}
                     onClick={() => handleViewSnapshot(snap)}
@@ -983,6 +1022,7 @@ export default function MissionControl() {
                       </p>
                       <p className="text-[8px] text-[#8fa3ad]">
                         {snap.captured_at ? new Date(snap.captured_at).toLocaleDateString() : ""}
+                        {snapshotLibraryScope === "shared" ? ` · ${snap.owner_email}` : ""}
                         {snap.annotated ? " · annotated" : ""}
                       </p>
                     </div>
