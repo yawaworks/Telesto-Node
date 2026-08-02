@@ -194,6 +194,17 @@ export default function SnapshotAnnotator({
   const [imageLoaded, setImageLoaded] = useState(false);
 
   const [strokes, setStrokes] = useState([]);
+  // strokesRef mirrors `strokes` and is what redraw() actually reads from.
+  // Drawing must be synchronous and immediate — waiting on a useEffect
+  // keyed to the `strokes` state was causing committed annotations to
+  // flash and then vanish under certain render-timing conditions. `strokes`
+  // state still exists purely to drive UI (the "Remove annotations"
+  // disabled state, etc.); it is never read for actual rendering.
+  const strokesRef = useRef([]);
+  function setStrokesBoth(next) {
+    strokesRef.current = next;
+    setStrokes(next);
+  }
   const [history, setHistory] = useState([]); // past strokes-array snapshots, for Undo
   const [future, setFuture] = useState([]); // undone snapshots, for Redo
   const [tool, setTool] = useState("pen");
@@ -221,6 +232,7 @@ export default function SnapshotAnnotator({
     if (!open || !imageSrc) return;
     setImageLoaded(false);
     setStrokes([]);
+    strokesRef.current = [];
     setHistory([]);
     setFuture([]);
     setCropSelection(null);
@@ -266,7 +278,7 @@ export default function SnapshotAnnotator({
       const ctx = canvas.getContext("2d");
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      for (const s of strokes) {
+      for (const s of strokesRef.current) {
         if (s) drawStroke(ctx, s);
       }
 
@@ -285,28 +297,31 @@ export default function SnapshotAnnotator({
       // just skip this frame instead of crashing.
       console.error("SnapshotAnnotator redraw failed:", err, {
         previewStroke,
-        strokeCount: strokes.length,
+        strokeCount: strokesRef.current.length,
         cropSelection,
       });
     }
   }
 
+  // Only the initial image load (and crop-selection marquee) need the
+  // effect to trigger a redraw — every stroke-committing action below
+  // calls redraw() itself, synchronously, right after updating strokesRef.
   useEffect(() => {
     if (imageLoaded) redraw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [imageLoaded, strokes, cropSelection]);
+  }, [imageLoaded, cropSelection]);
 
-  function pushHistory(snapshot) {
-    setHistory((h) => [...h, snapshot]);
+  function pushHistory() {
+    setHistory((h) => [...h, strokesRef.current]);
     setFuture([]);
   }
 
   function commitTextEditor() {
     setTextEditor((current) => {
       if (current && current.value.trim()) {
-        pushHistory(strokes);
-        setStrokes((prev) => [
-          ...prev,
+        pushHistory();
+        const next = [
+          ...strokesRef.current,
           {
             type: "text",
             start: { x: current.x, y: current.y },
@@ -314,7 +329,9 @@ export default function SnapshotAnnotator({
             color,
             width,
           },
-        ]);
+        ];
+        setStrokesBoth(next);
+        redraw();
       }
       return null;
     });
@@ -338,8 +355,10 @@ export default function SnapshotAnnotator({
       }
 
       if (tool === "eraser") {
-        pushHistory(strokes); // one history step per erase-drag, not per pixel
-        setStrokes((prev) => prev.filter((s) => !strokeNear(s, point, ERASER_RADIUS)));
+        pushHistory(); // one history step per erase-drag, not per pixel
+        const next = strokesRef.current.filter((s) => !strokeNear(s, point, ERASER_RADIUS));
+        setStrokesBoth(next);
+        redraw();
         drawingRef.current = { type: "eraser" };
         return;
       }
@@ -366,7 +385,9 @@ export default function SnapshotAnnotator({
       const point = getCanvasPoint(canvas, e.clientX, e.clientY);
 
       if (drawingRef.current.type === "eraser") {
-        setStrokes((prev) => prev.filter((s) => !strokeNear(s, point, ERASER_RADIUS)));
+        const next = strokesRef.current.filter((s) => !strokeNear(s, point, ERASER_RADIUS));
+        setStrokesBoth(next);
+        redraw();
         return;
       }
       if (drawingRef.current.type === "pen" || drawingRef.current.type === "highlighter") {
@@ -399,8 +420,10 @@ export default function SnapshotAnnotator({
       }
 
       if (drawingRef.current.type !== "eraser") {
-        pushHistory(strokes);
-        setStrokes((prev) => [...prev, drawingRef.current]);
+        pushHistory();
+        const next = [...strokesRef.current, drawingRef.current];
+        setStrokesBoth(next);
+        redraw();
       }
     } catch (err) {
       console.error("SnapshotAnnotator pointer-up failed:", err, { drawing: drawingRef.current });
@@ -411,24 +434,27 @@ export default function SnapshotAnnotator({
 
   function handleUndo() {
     if (history.length === 0) return;
-    setFuture((f) => [...f, strokes]);
+    setFuture((f) => [...f, strokesRef.current]);
     const prevSnapshot = history[history.length - 1];
     setHistory((h) => h.slice(0, -1));
-    setStrokes(prevSnapshot);
+    setStrokesBoth(prevSnapshot);
+    redraw();
   }
 
   function handleRedo() {
     if (future.length === 0) return;
-    setHistory((h) => [...h, strokes]);
+    setHistory((h) => [...h, strokesRef.current]);
     const nextSnapshot = future[future.length - 1];
     setFuture((f) => f.slice(0, -1));
-    setStrokes(nextSnapshot);
+    setStrokesBoth(nextSnapshot);
+    redraw();
   }
 
   function handleClearAnnotations() {
-    if (strokes.length === 0) return;
-    pushHistory(strokes);
-    setStrokes([]);
+    if (strokesRef.current.length === 0) return;
+    pushHistory();
+    setStrokesBoth([]);
+    redraw();
   }
 
   function selectTool(id) {
@@ -463,6 +489,7 @@ export default function SnapshotAnnotator({
       imageRef.current = newImg;
       canvas.width = w;
       canvas.height = h;
+      strokesRef.current = [];
       setStrokes([]);
       setHistory([]);
       setFuture([]);
@@ -470,6 +497,7 @@ export default function SnapshotAnnotator({
       setManualZoom(false);
       setZoomFactor(1);
       setTool("pen");
+      redraw();
     };
     newImg.src = off.toDataURL("image/jpeg", 0.95);
   }
