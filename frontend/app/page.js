@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { useSession, signOut } from "next-auth/react";
+import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { initGamepadNavigation } from "../lib/gamepad-controller";
@@ -317,6 +317,7 @@ export default function MissionControl() {
         salinity: t.salinity || "",
         heading: t.heading || "",
         species_query: detectedLabel || speciesQuery || "",
+        owner_email: session?.user?.email || "",
       });
 
       setSnapshotMessage({ type: "pending", text: "Saving snapshot…" });
@@ -540,21 +541,12 @@ export default function MissionControl() {
           >
             Actions
           </button>
-          <span className="hidden sm:inline text-xs text-[#8fa3ad] max-w-[180px] truncate">
-            {session?.user?.email || session?.user?.name}
-          </span>
           <Link
             href="/profile"
-            className="text-[10px] sm:text-xs uppercase tracking-widest text-[#8fa3ad] hover:text-[#d3dbe0] whitespace-nowrap"
+            className="border rounded-lg px-2 sm:px-3 py-1.5 text-[10px] sm:text-xs uppercase tracking-widest whitespace-nowrap bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
           >
             Profile
           </Link>
-          <button
-            onClick={() => signOut({ callbackUrl: "/login" })}
-            className="text-[10px] sm:text-xs uppercase tracking-widest text-[#c47a6e] hover:text-[#d99a8f] whitespace-nowrap"
-          >
-            Sign out
-          </button>
         </div>
       </div>
 

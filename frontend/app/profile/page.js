@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSession } from "next-auth/react";
+import { useSession, signOut } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 
@@ -94,7 +94,7 @@ const inputClass =
   "w-full bg-black/20 border border-[#3a444a] rounded-lg px-3 py-2 text-sm text-[#d3dbe0] placeholder-[#5a6a72] outline-none focus:border-[#8fa3ad]";
 
 export default function ProfilePage() {
-  const { data: session, status: sessionStatus } = useSession();
+  const { data: session, status: sessionStatus, update: updateSession } = useSession();
   const router = useRouter();
 
   useEffect(() => {
@@ -105,6 +105,15 @@ export default function ProfilePage() {
   const [saving, setSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState(null);
   const [clipCount, setClipCount] = useState(null);
+  const [snapshotCount, setSnapshotCount] = useState(null);
+  const [hasPassword, setHasPassword] = useState(true);
+
+  const [emailFormOpen, setEmailFormOpen] = useState(false);
+  const [newEmail, setNewEmail] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [emailSaving, setEmailSaving] = useState(false);
+  const [emailMessage, setEmailMessage] = useState(null);
+
   const [profile, setProfile] = useState({
     email: "",
     name: "",
@@ -132,6 +141,7 @@ export default function ProfilePage() {
         if (res.ok) {
           const data = await res.json();
           setProfile((prev) => ({ ...prev, ...data }));
+          setHasPassword(Boolean(data.hasPassword));
         }
       } catch (err) {
         console.error("Failed to load profile:", err);
@@ -142,18 +152,27 @@ export default function ProfilePage() {
     load();
 
     async function loadStats() {
+      const ownerEmail = session?.user?.email || "";
       try {
-        const params = new URLSearchParams({
-          scope: "mine",
-          owner_email: session?.user?.email || "",
-        });
+        const params = new URLSearchParams({ scope: "mine", owner_email: ownerEmail });
         const res = await fetch(`${API_BASE_URL}/clips?${params}`);
         if (res.ok) {
           const data = await res.json();
           setClipCount(Array.isArray(data) ? data.length : null);
         }
       } catch (err) {
-        console.error("Failed to load activity stats:", err);
+        console.error("Failed to load clip stats:", err);
+      }
+
+      try {
+        const params = new URLSearchParams({ owner_email: ownerEmail });
+        const res = await fetch(`${API_BASE_URL}/snapshots/count?${params}`);
+        if (res.ok) {
+          const data = await res.json();
+          setSnapshotCount(typeof data.count === "number" ? data.count : null);
+        }
+      } catch (err) {
+        console.error("Failed to load snapshot stats:", err);
       }
     }
     loadStats();
@@ -196,6 +215,38 @@ export default function ProfilePage() {
     }
   }
 
+  async function handleChangeEmail() {
+    setEmailSaving(true);
+    setEmailMessage(null);
+    try {
+      const res = await fetch("/api/account/email", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          newEmail,
+          ...(hasPassword ? { currentPassword } : {}),
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Couldn't change email");
+
+      // Refresh the JWT so session.user.email (used across the app for
+      // owner_email lookups) reflects the change immediately, without
+      // forcing a sign-out/sign-in.
+      await updateSession({ email: data.email });
+      setProfile((prev) => ({ ...prev, email: data.email }));
+      setEmailFormOpen(false);
+      setNewEmail("");
+      setCurrentPassword("");
+      setEmailMessage({ type: "success", text: "Email updated" });
+    } catch (err) {
+      setEmailMessage({ type: "error", text: err.message || "Couldn't change email" });
+    } finally {
+      setEmailSaving(false);
+      setTimeout(() => setEmailMessage(null), 4000);
+    }
+  }
+
   if (sessionStatus === "unauthenticated") return null;
 
   return (
@@ -232,12 +283,16 @@ export default function ProfilePage() {
             </div>
 
             {/* Activity snapshot */}
-            <div className="grid grid-cols-2 gap-3 mb-8">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-8">
               <div className="bg-[#1c2226] border border-[#3a444a] rounded-xl px-4 py-3">
                 <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">Clips saved</p>
                 <p className="text-lg font-bold">{clipCount === null ? "—" : clipCount}</p>
               </div>
               <div className="bg-[#1c2226] border border-[#3a444a] rounded-xl px-4 py-3">
+                <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">Snapshots taken</p>
+                <p className="text-lg font-bold">{snapshotCount === null ? "—" : snapshotCount}</p>
+              </div>
+              <div className="bg-[#1c2226] border border-[#3a444a] rounded-xl px-4 py-3 col-span-2 sm:col-span-1">
                 <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">Member since</p>
                 <p className="text-lg font-bold">
                   {profile.memberSince
@@ -351,20 +406,117 @@ export default function ProfilePage() {
                 />
               </section>
 
+              {/* Account & security */}
+              <section className="bg-[#1c2226] border border-[#3a444a] rounded-xl p-4 sm:p-5 flex flex-col gap-4">
+                <h2 className="text-xs uppercase tracking-widest text-[#5a6a72]">
+                  Account &amp; security
+                </h2>
+
+                <div>
+                  <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad] mb-1.5">
+                    Login email
+                  </p>
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span className="text-sm text-[#d3dbe0]">{profile.email}</span>
+                    {!emailFormOpen && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEmailFormOpen(true);
+                          setNewEmail(profile.email);
+                        }}
+                        className="text-xs uppercase tracking-widest text-[#8fa3ad] hover:text-[#d3dbe0]"
+                      >
+                        Change
+                      </button>
+                    )}
+                  </div>
+
+                  {emailFormOpen && (
+                    <div className="mt-3 flex flex-col gap-3 bg-black/20 border border-[#3a444a] rounded-lg p-3">
+                      <Field label="New email">
+                        <input
+                          type="email"
+                          value={newEmail}
+                          onChange={(e) => setNewEmail(e.target.value)}
+                          className={inputClass}
+                        />
+                      </Field>
+                      {hasPassword && (
+                        <Field label="Current password" hint="Required to confirm this change">
+                          <input
+                            type="password"
+                            value={currentPassword}
+                            onChange={(e) => setCurrentPassword(e.target.value)}
+                            className={inputClass}
+                          />
+                        </Field>
+                      )}
+                      {!hasPassword && (
+                        <p className="text-[11px] text-[#5a6a72]">
+                          This account signs in with Google, so no password confirmation is needed.
+                        </p>
+                      )}
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={handleChangeEmail}
+                          disabled={emailSaving || !newEmail}
+                          className="bg-[#8fa3ad]/10 border border-[#8fa3ad]/60 rounded-lg px-4 py-1.5 text-xs uppercase tracking-widest hover:bg-[#8fa3ad]/20 disabled:opacity-50"
+                        >
+                          {emailSaving ? "Saving…" : "Confirm change"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEmailFormOpen(false);
+                            setNewEmail("");
+                            setCurrentPassword("");
+                          }}
+                          className="text-xs uppercase tracking-widest text-[#5a6a72] hover:text-[#b7c4cc]"
+                        >
+                          Cancel
+                        </button>
+                        {emailMessage && (
+                          <span
+                            className={`text-xs ${
+                              emailMessage.type === "success" ? "text-[#8fa3ad]" : "text-[#c47a6e]"
+                            }`}
+                          >
+                            {emailMessage.text}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {!emailFormOpen && emailMessage && (
+                    <p
+                      className={`text-xs mt-2 ${
+                        emailMessage.type === "success" ? "text-[#8fa3ad]" : "text-[#c47a6e]"
+                      }`}
+                    >
+                      {emailMessage.text}
+                    </p>
+                  )}
+                </div>
+
+                <div className="pt-3 border-t border-[#3a444a] flex items-center justify-between">
+                  <p className="text-[11px] text-[#5a6a72]">Signed in to Telesto Node mission control</p>
+                  <button
+                    type="button"
+                    onClick={() => signOut({ callbackUrl: "/login" })}
+                    className="text-xs uppercase tracking-widest text-[#c47a6e] hover:text-[#d99a8f]"
+                  >
+                    Sign out
+                  </button>
+                </div>
+              </section>
+
               {/* Links & contact */}
               <section className="bg-[#1c2226] border border-[#3a444a] rounded-xl p-4 sm:p-5 flex flex-col gap-4">
                 <h2 className="text-xs uppercase tracking-widest text-[#5a6a72]">
                   Links &amp; contact
                 </h2>
-
-                <Field label="Login email" hint="Used to sign in — not editable here">
-                  <input
-                    type="text"
-                    value={profile.email}
-                    disabled
-                    className={`${inputClass} opacity-60 cursor-not-allowed`}
-                  />
-                </Field>
 
                 <Field label="Public contact email" hint="Shown to collaborators, if different from login email">
                   <input

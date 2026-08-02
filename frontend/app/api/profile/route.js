@@ -101,6 +101,7 @@ export async function GET() {
   const profile = user.profile || {};
   return NextResponse.json({
     email: user.email,
+    hasPassword: Boolean(user.hashedPassword),
     name: profile.name || user.name || "",
     institution: profile.institution || "",
     role: profile.role || "",

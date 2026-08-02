@@ -340,6 +340,7 @@ async def create_snapshot(
     salinity: str = "",
     heading: str = "",
     species_query: str = "",
+    owner_email: str = "",
 ):
     """Uploads a Discovery Snapshot (triggered by the gamepad's 'A' button)
     to Cloudinary, then logs a record of it — image URL plus whatever
@@ -371,6 +372,7 @@ async def create_snapshot(
                         "heading": heading,
                     },
                     "species_query": species_query,
+                    "owner_email": owner_email,
                 }
             )
             saved_to_db = True
@@ -384,6 +386,24 @@ async def create_snapshot(
         public_id=upload_result["public_id"],
         saved_to_db=saved_to_db,
     )
+
+
+@app.get("/snapshots/count")
+@limiter.limit("60/minute")
+async def count_snapshots(request: Request, owner_email: str):
+    """Returns how many Discovery Snapshots a researcher has taken — used
+    for the activity stats on their profile page. Snapshots created before
+    owner_email was tracked won't be attributed to anyone; that's expected
+    for historical data."""
+    if not owner_email:
+        raise HTTPException(status_code=400, detail="owner_email is required")
+
+    db = get_db()
+    if db is None:
+        return {"count": 0}
+
+    count = db["snapshots"].count_documents({"owner_email": owner_email})
+    return {"count": count}
 
 
 @app.get("/export-report")

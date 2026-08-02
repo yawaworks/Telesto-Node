@@ -26,6 +26,14 @@ export const forgotPasswordLimiter = new Ratelimit({
   prefix: "ratelimit:forgot-password",
 });
 
+// Keyed by the account's user id — this endpoint checks a password, so it
+// needs the same brute-force protection as login.
+export const emailChangeLimiter = new Ratelimit({
+  redis,
+  limiter: Ratelimit.slidingWindow(5, "300 s"),
+  prefix: "ratelimit:email-change",
+});
+
 export function getClientIp(request) {
   const forwarded = request.headers.get("x-forwarded-for");
   return forwarded ? forwarded.split(",")[0].trim() : "unknown";

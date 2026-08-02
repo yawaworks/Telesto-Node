@@ -62,6 +62,15 @@ export const authOptions = {
     signIn: "/login",
   },
   callbacks: {
+    async jwt({ token, trigger, session }) {
+      // Lets the client call useSession().update({ email }) right after a
+      // successful email change, so the new email shows up everywhere that
+      // reads session.user.email without forcing a sign-out/sign-in.
+      if (trigger === "update" && session?.email) {
+        token.email = session.email;
+      }
+      return token;
+    },
     async session({ session, token }) {
       if (session.user) {
         session.user.id = token.sub;
