@@ -1,12 +1,15 @@
+import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth/next";
 import { ObjectId } from "mongodb";
 import { authOptions } from "../../auth/[...nextauth]/route";
 import clientPromise from "../../../../lib/mongodb";
+import { sendEmail } from "../../../../lib/mailer";
 import { emailChangeLimiter } from "../../../../lib/rateLimit";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const CHANGE_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 export async function PATCH(request) {
   const session = await getServerSession(authOptions);
@@ -38,6 +41,7 @@ export async function PATCH(request) {
 
   const client = await clientPromise;
   const users = client.db().collection("users");
+  const changeTokens = client.db().collection("emailChangeTokens");
   const userId = new ObjectId(session.user.id);
 
   const user = await users.findOne({ _id: userId });
@@ -46,13 +50,13 @@ export async function PATCH(request) {
   }
 
   if (newEmail === user.email) {
-    return NextResponse.json({ success: true, email: user.email, unchanged: true });
+    return NextResponse.json({ error: "That's already your current email" }, { status: 400 });
   }
 
   // Credentials accounts must confirm identity with their current password
-  // before the login email can change — this is the one field that
+  // before a change can even be requested — this is the one field that
   // controls account access, so we don't let a hijacked session alone
-  // change it silently.
+  // change it.
   if (user.hashedPassword) {
     if (!currentPassword) {
       return NextResponse.json(
@@ -77,10 +81,64 @@ export async function PATCH(request) {
     );
   }
 
-  await users.updateOne(
-    { _id: userId },
-    { $set: { email: newEmail, updatedAt: new Date() } }
-  );
+  // Only the newest pending request for this user should be valid.
+  await changeTokens.deleteMany({ userId });
 
-  return NextResponse.json({ success: true, email: newEmail });
+  const rawToken = crypto.randomBytes(32).toString("hex");
+  const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
+  const expiresAt = new Date(Date.now() + CHANGE_TOKEN_TTL_MS);
+
+  await changeTokens.insertOne({
+    userId,
+    oldEmail: user.email,
+    newEmail,
+    tokenHash,
+    expiresAt,
+    createdAt: new Date(),
+  });
+
+  const confirmUrl = `${process.env.NEXTAUTH_URL}/api/account/email/confirm?token=${rawToken}`;
+
+  // The confirmation link goes to the NEW address — that's the whole
+  // point, it proves the person requesting the change actually controls
+  // it. Nothing changes in the database until they click it.
+  try {
+    await sendEmail({
+      to: newEmail,
+      subject: "Confirm your new Telesto Node email",
+      html: `
+        <p>Someone requested to change the login email on a Telesto Node account from ${user.email} to this address.</p>
+        <p><a href="${confirmUrl}">Click here to confirm this email change</a>. This link expires in 1 hour.</p>
+        <p>If you didn't request this, you can safely ignore this email — no change will be made.</p>
+      `,
+    });
+  } catch (err) {
+    console.error("Failed to send email-change confirmation:", err);
+    return NextResponse.json(
+      { error: "Couldn't send confirmation email — try again shortly" },
+      { status: 502 }
+    );
+  }
+
+  // A heads-up to the OLD address too, so the account owner notices if
+  // they didn't request this themselves.
+  try {
+    await sendEmail({
+      to: user.email,
+      subject: "Email change requested on your Telesto Node account",
+      html: `
+        <p>A request was made to change your Telesto Node login email to ${newEmail}.</p>
+        <p>If this was you, no action is needed — check the new inbox to confirm it.</p>
+        <p>If this wasn't you, your password may be compromised. Consider resetting it.</p>
+      `,
+    });
+  } catch (err) {
+    console.error("Failed to send email-change heads-up to old address:", err);
+    // Not fatal — the confirmation email to the new address already went out.
+  }
+
+  return NextResponse.json({
+    pending: true,
+    message: `Confirmation link sent to ${newEmail}. Nothing changes until it's confirmed.`,
+  });
 }

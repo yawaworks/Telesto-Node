@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useSession, signOut } from "next-auth/react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
@@ -93,9 +93,10 @@ function Field({ label, hint, children }) {
 const inputClass =
   "w-full bg-black/20 border border-[#3a444a] rounded-lg px-3 py-2 text-sm text-[#d3dbe0] placeholder-[#5a6a72] outline-none focus:border-[#8fa3ad]";
 
-export default function ProfilePage() {
+function ProfileContent() {
   const { data: session, status: sessionStatus, update: updateSession } = useSession();
   const router = useRouter();
+  const searchParams = useSearchParams();
 
   useEffect(() => {
     if (sessionStatus === "unauthenticated") router.push("/login");
@@ -131,25 +132,28 @@ export default function ProfilePage() {
     memberSince: null,
   });
 
+  async function loadProfile() {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/profile");
+      if (res.ok) {
+        const data = await res.json();
+        setProfile((prev) => ({ ...prev, ...data }));
+        setHasPassword(Boolean(data.hasPassword));
+        return data;
+      }
+    } catch (err) {
+      console.error("Failed to load profile:", err);
+    } finally {
+      setLoading(false);
+    }
+    return null;
+  }
+
   useEffect(() => {
     if (sessionStatus !== "authenticated") return;
 
-    async function load() {
-      setLoading(true);
-      try {
-        const res = await fetch("/api/profile");
-        if (res.ok) {
-          const data = await res.json();
-          setProfile((prev) => ({ ...prev, ...data }));
-          setHasPassword(Boolean(data.hasPassword));
-        }
-      } catch (err) {
-        console.error("Failed to load profile:", err);
-      } finally {
-        setLoading(false);
-      }
-    }
-    load();
+    loadProfile();
 
     async function loadStats() {
       const ownerEmail = session?.user?.email || "";
@@ -177,6 +181,43 @@ export default function ProfilePage() {
     }
     loadStats();
   }, [sessionStatus, session?.user?.email]);
+
+  useEffect(() => {
+    const emailChange = searchParams.get("emailChange");
+    if (!emailChange) return;
+
+    async function handleReturnFromConfirmLink() {
+      if (emailChange === "success") {
+        const data = await loadProfile();
+        if (data?.email) {
+          // Refresh the JWT so session.user.email (used across the app for
+          // owner_email lookups) reflects the new address immediately.
+          await updateSession({ email: data.email });
+        }
+        setEmailMessage({ type: "success", text: "Email address confirmed and updated" });
+      } else {
+        const reason = searchParams.get("reason");
+        const reasonText =
+          {
+            expired: "That confirmation link expired. Request the change again.",
+            invalid_token: "That confirmation link isn't valid. Request the change again.",
+            email_taken: "That email was claimed by another account before it could be confirmed.",
+            missing_token: "That confirmation link is incomplete.",
+          }[reason] || "Couldn't confirm that email change.";
+        setEmailMessage({ type: "error", text: reasonText });
+      }
+      // Strip the query params so a page refresh doesn't replay this.
+      router.replace("/profile");
+    }
+    handleReturnFromConfirmLink();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  useEffect(() => {
+    if (!emailMessage) return;
+    const t = setTimeout(() => setEmailMessage(null), 6000);
+    return () => clearTimeout(t);
+  }, [emailMessage]);
 
   function update(field, value) {
     setProfile((prev) => ({ ...prev, [field]: value }));
@@ -230,20 +271,19 @@ export default function ProfilePage() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Couldn't change email");
 
-      // Refresh the JWT so session.user.email (used across the app for
-      // owner_email lookups) reflects the change immediately, without
-      // forcing a sign-out/sign-in.
-      await updateSession({ email: data.email });
-      setProfile((prev) => ({ ...prev, email: data.email }));
+      // Nothing changes in the DB yet — the address still has to be
+      // confirmed via the link we just emailed to it.
       setEmailFormOpen(false);
       setNewEmail("");
       setCurrentPassword("");
-      setEmailMessage({ type: "success", text: "Email updated" });
+      setEmailMessage({
+        type: "success",
+        text: data.message || `Confirmation link sent to ${newEmail}`,
+      });
     } catch (err) {
       setEmailMessage({ type: "error", text: err.message || "Couldn't change email" });
     } finally {
       setEmailSaving(false);
-      setTimeout(() => setEmailMessage(null), 4000);
     }
   }
 
@@ -434,6 +474,10 @@ export default function ProfilePage() {
 
                   {emailFormOpen && (
                     <div className="mt-3 flex flex-col gap-3 bg-black/20 border border-[#3a444a] rounded-lg p-3">
+                      <p className="text-[11px] text-[#5a6a72]">
+                        We'll send a confirmation link to the new address. Nothing changes until you
+                        click it.
+                      </p>
                       <Field label="New email">
                         <input
                           type="email"
@@ -443,7 +487,7 @@ export default function ProfilePage() {
                         />
                       </Field>
                       {hasPassword && (
-                        <Field label="Current password" hint="Required to confirm this change">
+                        <Field label="Current password" hint="Required to confirm this request">
                           <input
                             type="password"
                             value={currentPassword}
@@ -464,7 +508,7 @@ export default function ProfilePage() {
                           disabled={emailSaving || !newEmail}
                           className="bg-[#8fa3ad]/10 border border-[#8fa3ad]/60 rounded-lg px-4 py-1.5 text-xs uppercase tracking-widest hover:bg-[#8fa3ad]/20 disabled:opacity-50"
                         >
-                          {emailSaving ? "Saving…" : "Confirm change"}
+                          {emailSaving ? "Sending…" : "Send confirmation link"}
                         </button>
                         <button
                           type="button"
@@ -603,5 +647,19 @@ export default function ProfilePage() {
         )}
       </div>
     </div>
+  );
+}
+
+export default function ProfilePage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen bg-[#171d20] text-[#d3dbe0] flex items-center justify-center font-mono text-sm">
+          Loading profile…
+        </div>
+      }
+    >
+      <ProfileContent />
+    </Suspense>
   );
 }
