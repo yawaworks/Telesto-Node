@@ -30,7 +30,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from app.alerts import send_detection_alert
-from app.cloudinary_client import delete_clip, upload_clip, upload_snapshot
+from app.cloudinary_client import delete_clip, delete_snapshot, upload_clip, upload_snapshot
 from app.db import get_db, is_connected
 from app.inference import clahe_correct, coral_bleaching_ratio, predict_with_roboflow
 from app.obis_client import fetch_obis_species_data
@@ -202,6 +202,16 @@ class SnapshotResponse(BaseModel):
     saved_to_db: bool
 
 
+class SnapshotListItem(BaseModel):
+    id: str
+    url: str
+    captured_at: str
+    telemetry: dict
+    species_query: str
+    owner_email: str
+    annotated: bool = False
+
+
 class ClipResponse(BaseModel):
     id: str
     url: str
@@ -341,13 +351,14 @@ async def create_snapshot(
     heading: str = "",
     species_query: str = "",
     owner_email: str = "",
+    annotated: bool = False,
 ):
-    """Uploads a Discovery Snapshot (triggered by the gamepad's 'A' button)
-    to Cloudinary, then logs a record of it — image URL plus whatever
-    mission telemetry/species context was active at capture time — to
-    Mongo if it's connected. Falls back to upload-only (no DB record) if
-    Mongo is currently down, same graceful-degradation pattern used
-    elsewhere in this API."""
+    """Uploads a Discovery Snapshot (triggered by the gamepad's 'A' button,
+    or saved from the annotation editor) to Cloudinary, then logs a record
+    of it — image URL plus whatever mission telemetry/species context was
+    active at capture time — to Mongo if it's connected. Falls back to
+    upload-only (no DB record) if Mongo is currently down, same graceful-
+    degradation pattern used elsewhere in this API."""
     raw_bytes = await file.read()
 
     try:
@@ -373,6 +384,7 @@ async def create_snapshot(
                     },
                     "species_query": species_query,
                     "owner_email": owner_email,
+                    "annotated": annotated,
                 }
             )
             saved_to_db = True
@@ -404,6 +416,64 @@ async def count_snapshots(request: Request, owner_email: str):
 
     count = db["snapshots"].count_documents({"owner_email": owner_email})
     return {"count": count}
+
+
+@app.get("/snapshots", response_model=List[SnapshotListItem])
+@limiter.limit("60/minute")
+async def list_snapshots(request: Request, owner_email: str):
+    """Returns a researcher's own Discovery Snapshots for the profile
+    gallery. Snapshots are personal only — unlike clips, there's no
+    team-shared view for them."""
+    if not owner_email:
+        raise HTTPException(status_code=400, detail="owner_email is required")
+
+    db = get_db()
+    if db is None:
+        return []
+
+    docs = db["snapshots"].find({"owner_email": owner_email}).sort("captured_at", -1).limit(200)
+    return [
+        SnapshotListItem(
+            id=str(doc["_id"]),
+            url=doc["url"],
+            captured_at=doc["captured_at"].isoformat() if doc.get("captured_at") else "",
+            telemetry=doc.get("telemetry", {}),
+            species_query=doc.get("species_query", ""),
+            owner_email=doc.get("owner_email", ""),
+            annotated=doc.get("annotated", False),
+        )
+        for doc in docs
+    ]
+
+
+@app.delete("/snapshots/{snapshot_id}")
+@limiter.limit("20/minute")
+async def remove_snapshot(request: Request, snapshot_id: str, owner_email: str):
+    """Deletes a Discovery Snapshot from both Mongo and Cloudinary.
+    Ownership-checked, same pattern as clip deletion."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Snapshot library is unavailable right now")
+
+    try:
+        oid = ObjectId(snapshot_id)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid snapshot id")
+
+    doc = db["snapshots"].find_one({"_id": oid})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+
+    if doc.get("owner_email") != owner_email:
+        raise HTTPException(status_code=403, detail="Only the snapshot's owner can delete it")
+
+    try:
+        delete_snapshot(doc["public_id"])
+    except Exception as exc:
+        print(f"[snapshots] Cloudinary delete failed for {doc['public_id']}: {exc}")
+
+    db["snapshots"].delete_one({"_id": oid})
+    return {"deleted": True}
 
 
 @app.get("/export-report")

@@ -50,5 +50,26 @@ export async function GET(request) {
   );
   await changeTokens.deleteOne({ _id: tokenDoc._id });
 
+  // Clips and snapshots are attributed by owner_email (the backend's
+  // schema), not a stable user id — without this, a researcher's saved
+  // clips and Discovery Snapshots would silently stop showing as "theirs"
+  // the moment their login email changes. Backend collections live in the
+  // explicit "telesto" database (see backend/app/db.py), which may differ
+  // from this client's default db, so name it explicitly here.
+  const telesto = client.db("telesto");
+  try {
+    await telesto
+      .collection("clips")
+      .updateMany({ owner_email: tokenDoc.oldEmail }, { $set: { owner_email: tokenDoc.newEmail } });
+    await telesto
+      .collection("snapshots")
+      .updateMany({ owner_email: tokenDoc.oldEmail }, { $set: { owner_email: tokenDoc.newEmail } });
+  } catch (err) {
+    // The email change itself already succeeded — don't fail the whole
+    // confirmation over this. Worst case, historical clips/snapshots stay
+    // attributed to the old address and need a manual fix.
+    console.error("Failed to migrate clips/snapshots to new email:", err);
+  }
+
   return redirect("success");
 }

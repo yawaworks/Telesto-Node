@@ -58,3 +58,9 @@ def delete_clip(public_id: str) -> bool:
     the app's list of it). Returns True if Cloudinary confirms deletion."""
     result = cloudinary.uploader.destroy(public_id, resource_type="video")
     return result.get("result") == "ok"
+
+
+def delete_snapshot(public_id: str) -> bool:
+    """Permanently removes a Discovery Snapshot image from Cloudinary."""
+    result = cloudinary.uploader.destroy(public_id, resource_type="image")
+    return result.get("result") == "ok"

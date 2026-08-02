@@ -10,6 +10,7 @@ import { loadSpeciesMarkers } from "../lib/species-markers";
 import { useFrameDetection } from "../lib/useFrameDetection";
 import { useTelemetry } from "../lib/useTelemetry";
 import DetectionOverlay from "../components/DetectionOverlay";
+import SnapshotAnnotator from "../components/SnapshotAnnotator";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
 const BLEACHING_ALERT_THRESHOLD = 0.4;
@@ -71,6 +72,17 @@ export default function MissionControl() {
   const [myClips, setMyClips] = useState([]);
   const [sharedClips, setSharedClips] = useState([]);
   const [libraryLoading, setLibraryLoading] = useState(false);
+
+  const [annotatorOpen, setAnnotatorOpen] = useState(false);
+  const [annotatorMode, setAnnotatorMode] = useState("new");
+  const [annotatorImageSrc, setAnnotatorImageSrc] = useState(null);
+  const [annotatorTelemetry, setAnnotatorTelemetry] = useState({});
+  const [annotatorSpeciesQuery, setAnnotatorSpeciesQuery] = useState("");
+  const [annotatorExistingId, setAnnotatorExistingId] = useState(null);
+
+  const [snapshotLibraryOpen, setSnapshotLibraryOpen] = useState(false);
+  const [snapshots, setSnapshots] = useState([]);
+  const [snapshotLibraryLoading, setSnapshotLibraryLoading] = useState(false);
 
   const { boxes, ghostBoxes, coralBleachingRatio, status } = useFrameDetection(videoRef, {
     enabled: viewMode === "video" && !videoLoadError,
@@ -247,6 +259,45 @@ export default function MissionControl() {
     fetchClips(libraryScope);
   }
 
+  async function fetchSnapshots() {
+    setSnapshotLibraryLoading(true);
+    try {
+      const params = new URLSearchParams({ owner_email: session?.user?.email || "" });
+      const response = await fetch(`${API_BASE_URL}/snapshots?${params}`);
+      if (!response.ok) throw new Error(`Failed to load snapshots: ${response.status}`);
+      const data = await response.json();
+      setSnapshots(data);
+    } catch (err) {
+      console.error("Failed to load snapshot library:", err);
+    } finally {
+      setSnapshotLibraryLoading(false);
+    }
+  }
+
+  function handleOpenSnapshotLibrary() {
+    setSnapshotLibraryOpen(true);
+    fetchSnapshots();
+  }
+
+  function handleViewSnapshot(snapshot) {
+    setAnnotatorMode("view");
+    setAnnotatorImageSrc(snapshot.url);
+    setAnnotatorTelemetry(snapshot.telemetry || {});
+    setAnnotatorSpeciesQuery(snapshot.species_query || "");
+    setAnnotatorExistingId(snapshot.id);
+    setAnnotatorOpen(true);
+  }
+
+  function handleSnapshotSaved() {
+    // A newly-saved (or re-annotated) snapshot should show up next time
+    // the gallery is opened, and nudge the count on the profile page.
+    if (snapshotLibraryOpen) fetchSnapshots();
+  }
+
+  function handleSnapshotDeleted(id) {
+    setSnapshots((prev) => prev.filter((s) => s.id !== id));
+  }
+
   function handleSwitchLibraryScope(scope) {
     setLibraryScope(scope);
     const alreadyLoaded = scope === "mine" ? myClips.length > 0 : sharedClips.length > 0;
@@ -295,13 +346,7 @@ export default function MissionControl() {
       const ctx = canvas.getContext("2d");
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      const blob = await new Promise((resolve) =>
-        canvas.toBlob(resolve, "image/jpeg", 0.92)
-      );
-      if (!blob) throw new Error("Failed to capture frame");
-
-      const formData = new FormData();
-      formData.append("file", blob, `discovery-${Date.now()}.jpg`);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
 
       const t = telemetryRef.current;
       // Prefer whatever's actually detected on screen right now over the
@@ -310,33 +355,25 @@ export default function MissionControl() {
       // the latest detection, whether triggered by the on-screen button
       // or the gamepad A-button path.
       const detectedLabel = boxesRef.current?.[0]?.label;
-      const params = new URLSearchParams({
+
+      // Hand off to the annotation editor (screenshot-tool style) rather
+      // than uploading immediately — the researcher decides from there
+      // whether to annotate, save, download, or share.
+      setAnnotatorMode("new");
+      setAnnotatorImageSrc(dataUrl);
+      setAnnotatorTelemetry({
         depth: t.depth || "",
         coords: t.coords || "",
         temp: t.temp || "",
         salinity: t.salinity || "",
         heading: t.heading || "",
-        species_query: detectedLabel || speciesQuery || "",
-        owner_email: session?.user?.email || "",
       });
-
-      setSnapshotMessage({ type: "pending", text: "Saving snapshot…" });
-
-      const response = await fetch(`${API_BASE_URL}/snapshot?${params}`, {
-        method: "POST",
-        body: formData,
-      });
-      if (!response.ok) throw new Error(`Snapshot upload failed: ${response.status}`);
-
-      const data = await response.json();
-      setSnapshotMessage({
-        type: "success",
-        text: data.saved_to_db ? "Snapshot saved" : "Snapshot saved (offline log unavailable)",
-      });
+      setAnnotatorSpeciesQuery(detectedLabel || speciesQuery || "");
+      setAnnotatorExistingId(null);
+      setAnnotatorOpen(true);
     } catch (err) {
-      console.error("Discovery Snapshot failed:", err);
-      setSnapshotMessage({ type: "error", text: "Snapshot failed — check connection" });
-    } finally {
+      console.error("Discovery Snapshot capture failed:", err);
+      setSnapshotMessage({ type: "error", text: "Couldn't capture the frame" });
       setTimeout(() => setSnapshotMessage(null), 3500);
     }
   }
@@ -674,6 +711,14 @@ export default function MissionControl() {
             Clip library
           </button>
         )}
+        {!isMapMode && (
+          <button
+            onClick={handleOpenSnapshotLibrary}
+            className="pointer-events-auto bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left text-[#b7c4cc] hover:bg-white/[0.08]"
+          >
+            Snapshots
+          </button>
+        )}
 
         {activeToast && (
           <div
@@ -891,6 +936,76 @@ export default function MissionControl() {
           </div>
         </div>
       )}
+
+      {snapshotLibraryOpen && (
+        <div className="absolute inset-0 bg-black/70 pointer-events-auto flex items-center justify-center p-3 sm:p-0">
+          <div className="w-full max-w-2xl max-h-[85vh] sm:max-h-[70vh] flex flex-col bg-[#1c2226] border border-[#3a444a] rounded-xl overflow-hidden">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-[#3a444a]">
+              <span className="text-xs uppercase tracking-widest text-[#8fa3ad]">
+                Discovery Snapshots
+              </span>
+              <button
+                onClick={() => setSnapshotLibraryOpen(false)}
+                className="text-[#8fa3ad] hover:text-[#d3dbe0] text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-3">
+              {snapshotLibraryLoading && (
+                <span className="text-[10px] text-[#5a6a72] uppercase tracking-widest">
+                  Loading…
+                </span>
+              )}
+              {!snapshotLibraryLoading && snapshots.length === 0 && (
+                <span className="text-[10px] text-[#5a6a72]">
+                  No snapshots yet — press the gamepad's A button or hit "Snapshot" during a live
+                  session.
+                </span>
+              )}
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {snapshots.map((snap) => (
+                  <button
+                    key={snap.id}
+                    onClick={() => handleViewSnapshot(snap)}
+                    className="group relative aspect-video rounded-lg overflow-hidden border border-[#3a444a] hover:border-[#8fa3ad]/60"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={snap.url}
+                      alt={snap.species_query || "Discovery snapshot"}
+                      className="w-full h-full object-cover"
+                    />
+                    <div className="absolute inset-x-0 bottom-0 bg-black/70 px-2 py-1 text-left">
+                      <p className="text-[9px] text-[#d3dbe0] truncate">
+                        {snap.species_query || "Unidentified"}
+                      </p>
+                      <p className="text-[8px] text-[#8fa3ad]">
+                        {snap.captured_at ? new Date(snap.captured_at).toLocaleDateString() : ""}
+                        {snap.annotated ? " · annotated" : ""}
+                      </p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <SnapshotAnnotator
+        open={annotatorOpen}
+        mode={annotatorMode}
+        imageSrc={annotatorImageSrc}
+        telemetry={annotatorTelemetry}
+        speciesQuery={annotatorSpeciesQuery}
+        ownerEmail={session?.user?.email || ""}
+        existingSnapshotId={annotatorExistingId}
+        onClose={() => setAnnotatorOpen(false)}
+        onSaved={handleSnapshotSaved}
+        onDeleted={handleSnapshotDeleted}
+      />
 
       <div className="crt-scanlines absolute inset-0 pointer-events-none opacity-10" />
     </div>
