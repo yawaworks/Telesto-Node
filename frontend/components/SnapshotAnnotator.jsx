@@ -43,13 +43,16 @@ function distToSegment(p, a, b) {
 // Rough hit-test used only by the eraser — doesn't need to be pixel
 // perfect, just close enough that dragging over a mark removes it.
 function strokeNear(stroke, point, radius) {
+  if (!stroke) return false;
   if (stroke.type === "pen" || stroke.type === "highlighter") {
-    return stroke.points.some((p) => dist(p, point) < radius);
+    return (stroke.points || []).some((p) => dist(p, point) < radius);
   }
   if (stroke.type === "arrow") {
+    if (!stroke.start || !stroke.end) return false;
     return distToSegment(point, stroke.start, stroke.end) < radius;
   }
   if (stroke.type === "rect") {
+    if (!stroke.start || !stroke.end) return false;
     const { start, end } = stroke;
     const corners = [
       { x: start.x, y: start.y },
@@ -63,7 +66,7 @@ function strokeNear(stroke, point, radius) {
     return false;
   }
   if (stroke.type === "text") {
-    return dist(stroke.start, point) < radius + 30;
+    return stroke.start ? dist(stroke.start, point) < radius + 30 : false;
   }
   return false;
 }
@@ -86,6 +89,7 @@ function drawArrowhead(ctx, from, to, color, headLength) {
 }
 
 function drawStroke(ctx, stroke) {
+  if (!stroke || !stroke.type) return;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
 
@@ -258,19 +262,32 @@ export default function SnapshotAnnotator({
     const canvas = canvasRef.current;
     const img = imageRef.current;
     if (!canvas || !img) return;
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    for (const s of strokes) drawStroke(ctx, s);
-
-    if (previewStroke) {
-      if (previewStroke.type === "crop") {
-        drawCropMarquee(ctx, previewStroke, canvas.width, canvas.height);
-      } else {
-        drawStroke(ctx, previewStroke);
+    try {
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      for (const s of strokes) {
+        if (s) drawStroke(ctx, s);
       }
-    } else if (cropSelection) {
-      drawCropMarquee(ctx, cropSelection, canvas.width, canvas.height);
+
+      if (previewStroke) {
+        if (previewStroke.type === "crop") {
+          drawCropMarquee(ctx, previewStroke, canvas.width, canvas.height);
+        } else {
+          drawStroke(ctx, previewStroke);
+        }
+      } else if (cropSelection) {
+        drawCropMarquee(ctx, cropSelection, canvas.width, canvas.height);
+      }
+    } catch (err) {
+      // Never let a canvas-drawing error take down the whole page — log
+      // it with full context so the real cause is visible next time, and
+      // just skip this frame instead of crashing.
+      console.error("SnapshotAnnotator redraw failed:", err, {
+        previewStroke,
+        strokeCount: strokes.length,
+        cropSelection,
+      });
     }
   }
 
@@ -305,72 +322,91 @@ export default function SnapshotAnnotator({
 
   function handlePointerDown(e) {
     if (!imageLoaded) return;
-    // A click elsewhere while the text box is open commits it first.
-    if (textEditor) {
-      commitTextEditor();
-      return;
-    }
+    try {
+      // A click elsewhere while the text box is open commits it first.
+      if (textEditor) {
+        commitTextEditor();
+        return;
+      }
 
-    const canvas = canvasRef.current;
-    const point = getCanvasPoint(canvas, e.clientX, e.clientY);
+      const canvas = canvasRef.current;
+      const point = getCanvasPoint(canvas, e.clientX, e.clientY);
 
-    if (tool === "text") {
-      setTextEditor({ x: point.x, y: point.y, value: "" });
-      return;
-    }
+      if (tool === "text") {
+        setTextEditor({ x: point.x, y: point.y, value: "" });
+        return;
+      }
 
-    if (tool === "eraser") {
-      pushHistory(strokes); // one history step per erase-drag, not per pixel
-      setStrokes((prev) => prev.filter((s) => !strokeNear(s, point, ERASER_RADIUS)));
-      drawingRef.current = { type: "eraser" };
-      return;
-    }
+      if (tool === "eraser") {
+        pushHistory(strokes); // one history step per erase-drag, not per pixel
+        setStrokes((prev) => prev.filter((s) => !strokeNear(s, point, ERASER_RADIUS)));
+        drawingRef.current = { type: "eraser" };
+        return;
+      }
 
-    canvas.setPointerCapture?.(e.pointerId);
+      canvas.setPointerCapture?.(e.pointerId);
 
-    if (tool === "crop") {
-      drawingRef.current = { type: "crop", start: point, end: point };
-    } else if (tool === "pen" || tool === "highlighter") {
-      drawingRef.current = { type: tool, points: [point], color, width };
-    } else {
-      drawingRef.current = { type: tool, start: point, end: point, color, width };
+      if (tool === "crop") {
+        drawingRef.current = { type: "crop", start: point, end: point };
+      } else if (tool === "pen" || tool === "highlighter") {
+        drawingRef.current = { type: tool, points: [point], color, width };
+      } else {
+        drawingRef.current = { type: tool, start: point, end: point, color, width };
+      }
+    } catch (err) {
+      console.error("SnapshotAnnotator pointer-down failed:", err, { tool });
+      drawingRef.current = null;
     }
   }
 
   function handlePointerMove(e) {
     if (!drawingRef.current) return;
-    const canvas = canvasRef.current;
-    const point = getCanvasPoint(canvas, e.clientX, e.clientY);
+    try {
+      const canvas = canvasRef.current;
+      const point = getCanvasPoint(canvas, e.clientX, e.clientY);
 
-    if (drawingRef.current.type === "eraser") {
-      setStrokes((prev) => prev.filter((s) => !strokeNear(s, point, ERASER_RADIUS)));
-      return;
+      if (drawingRef.current.type === "eraser") {
+        setStrokes((prev) => prev.filter((s) => !strokeNear(s, point, ERASER_RADIUS)));
+        return;
+      }
+      if (drawingRef.current.type === "pen" || drawingRef.current.type === "highlighter") {
+        drawingRef.current.points.push(point);
+      } else {
+        drawingRef.current.end = point;
+      }
+      redraw(drawingRef.current);
+    } catch (err) {
+      // Confirmed crash site in a prior session — log full context so the
+      // real cause is visible if it recurs, and abandon this stroke
+      // cleanly instead of letting it take down the whole page.
+      console.error("SnapshotAnnotator pointer-move failed:", err, {
+        tool,
+        drawing: drawingRef.current,
+      });
+      drawingRef.current = null;
     }
-    if (drawingRef.current.type === "pen" || drawingRef.current.type === "highlighter") {
-      drawingRef.current.points.push(point);
-    } else {
-      drawingRef.current.end = point;
-    }
-    redraw(drawingRef.current);
   }
 
   function handlePointerUp() {
     if (!drawingRef.current) return;
-
-    if (drawingRef.current.type === "crop") {
-      const { start, end } = drawingRef.current;
-      if (Math.abs(end.x - start.x) > 4 && Math.abs(end.y - start.y) > 4) {
-        setCropSelection({ start, end });
+    try {
+      if (drawingRef.current.type === "crop") {
+        const { start, end } = drawingRef.current;
+        if (Math.abs(end.x - start.x) > 4 && Math.abs(end.y - start.y) > 4) {
+          setCropSelection({ start, end });
+        }
+        return;
       }
-      drawingRef.current = null;
-      return;
-    }
 
-    if (drawingRef.current.type !== "eraser") {
-      pushHistory(strokes);
-      setStrokes((prev) => [...prev, drawingRef.current]);
+      if (drawingRef.current.type !== "eraser") {
+        pushHistory(strokes);
+        setStrokes((prev) => [...prev, drawingRef.current]);
+      }
+    } catch (err) {
+      console.error("SnapshotAnnotator pointer-up failed:", err, { drawing: drawingRef.current });
+    } finally {
+      drawingRef.current = null;
     }
-    drawingRef.current = null;
   }
 
   function handleUndo() {
