@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useSession, signOut } from "next-auth/react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { initGamepadNavigation } from "../lib/gamepad-controller";
 import { initBathymetryMap } from "../lib/bathymetry-map";
 import { loadSpeciesMarkers } from "../lib/species-markers";
@@ -542,6 +543,12 @@ export default function MissionControl() {
           <span className="hidden sm:inline text-xs text-[#8fa3ad] max-w-[180px] truncate">
             {session?.user?.email || session?.user?.name}
           </span>
+          <Link
+            href="/profile"
+            className="text-[10px] sm:text-xs uppercase tracking-widest text-[#8fa3ad] hover:text-[#d3dbe0] whitespace-nowrap"
+          >
+            Profile
+          </Link>
           <button
             onClick={() => signOut({ callbackUrl: "/login" })}
             className="text-[10px] sm:text-xs uppercase tracking-widest text-[#c47a6e] hover:text-[#d99a8f] whitespace-nowrap"
