@@ -21,6 +21,7 @@ const EDITABLE_FIELDS = [
   "orcidUrl",
   "websiteUrl",
   "alertsOptIn",
+  "onboardingCompleted",
 ];
 
 const ORCID_RE = /^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$/;
@@ -77,6 +78,7 @@ function validateAndClean(body) {
     if (body[field] !== undefined) clean[field] = sanitizeTagArray(body[field]);
   }
   if (body.alertsOptIn !== undefined) clean.alertsOptIn = Boolean(body.alertsOptIn);
+  if (body.onboardingCompleted !== undefined) clean.onboardingCompleted = Boolean(body.onboardingCompleted);
 
   return { clean, errors };
 }
@@ -114,6 +116,11 @@ export async function GET() {
     scholarUrl: profile.scholarUrl || "",
     websiteUrl: profile.websiteUrl || "",
     alertsOptIn: profile.alertsOptIn ?? true,
+    // Defaults to true (not false) so accounts that existed before this
+    // field was introduced aren't retroactively forced through onboarding.
+    // New signups have it explicitly set to false at creation time
+    // instead (see /api/register and the Google newUser page redirect).
+    onboardingCompleted: profile.onboardingCompleted ?? true,
     memberSince: user.createdAt || null,
   });
 }

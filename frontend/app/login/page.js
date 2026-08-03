@@ -46,7 +46,7 @@ export default function LoginPage() {
         return;
       }
 
-      router.push("/");
+      router.push(mode === "signup" ? "/onboarding" : "/");
     } catch (err) {
       setError("Something went wrong. Please try again.");
       setLoading(false);

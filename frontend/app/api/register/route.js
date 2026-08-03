@@ -62,6 +62,7 @@ export async function POST(request) {
       name: name || email,
       hashedPassword,
       createdAt: new Date(),
+      profile: { onboardingCompleted: false },
     });
   } catch (err) {
     // E11000 = duplicate key, i.e. two requests raced past the findOne

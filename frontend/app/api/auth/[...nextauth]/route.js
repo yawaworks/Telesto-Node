@@ -60,6 +60,11 @@ export const authOptions = {
   },
   pages: {
     signIn: "/login",
+    // NextAuth's adapter fires this only the first time a user record is
+    // created — i.e. a brand-new Google sign-in. Credentials signups are
+    // handled separately in the login page itself, since that flow
+    // doesn't go through the adapter's createUser path.
+    newUser: "/onboarding",
   },
   callbacks: {
     async jwt({ token, trigger, session }) {

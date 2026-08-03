@@ -32,6 +32,26 @@ export default function MissionControl() {
     }
   }, [sessionStatus, router]);
 
+  // Safety net: normally NextAuth's `pages.newUser` (Google) or the
+  // login page's post-signup redirect (credentials) already sends
+  // first-time users to /onboarding. This just catches anyone who lands
+  // here directly without having finished it.
+  useEffect(() => {
+    if (sessionStatus !== "authenticated") return;
+    let cancelled = false;
+    fetch("/api/profile")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && data && !data.onboardingCompleted) {
+          router.push("/onboarding");
+        }
+      })
+      .catch((err) => console.error("Onboarding check failed:", err));
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionStatus, router]);
+
   const videoRef = useRef(null);
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
