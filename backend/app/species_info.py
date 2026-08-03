@@ -1,3 +1,4 @@
+import asyncio
 import time
 import httpx
 
@@ -124,6 +125,36 @@ async def _fetch_related_papers(client: httpx.AsyncClient, scientific_name: str)
         return [], f"openalex:{scientific_name} -> error {e}"
 
 
+async def _fetch_wikipedia_with_fallback(client: httpx.AsyncClient, common_name: str, scientific_name: str):
+    """Bundles the "try scientific name, fall back to common name" logic
+    into one coroutine so the whole thing can run as a single unit inside
+    asyncio.gather, in parallel with the OBIS and OpenAlex calls — those
+    two don't depend on the Wikipedia result at all, so there's no reason
+    to make them wait for it."""
+    debug = []
+    wiki = await _fetch_wikipedia_summary(client, scientific_name)
+    debug.append(f"wikipedia:{scientific_name} -> {'hit' if wiki else 'miss'}")
+    if wiki is None and common_name != scientific_name:
+        wiki = await _fetch_wikipedia_summary(client, common_name)
+        debug.append(f"wikipedia:{common_name} -> {'hit' if wiki else 'miss'}")
+    return wiki, debug
+
+
+async def _fetch_obis_taxon(client: httpx.AsyncClient, scientific_name: str):
+    try:
+        resp = await client.get(
+            "https://api.obis.org/v3/taxon/complete",
+            params={"scientificname": scientific_name},
+            headers=REQUEST_HEADERS,
+        )
+        if resp.status_code == 200:
+            results = resp.json().get("results", [])
+            return results, f"obis:{scientific_name} -> {len(results)} results"
+        return [], f"obis:{scientific_name} -> HTTP {resp.status_code}"
+    except httpx.HTTPError as e:
+        return [], f"obis:{scientific_name} -> error {e}"
+
+
 async def get_species_info(species_name: str) -> dict:
     cached = _cache.get(species_name)
     if cached and (time.time() - cached["cached_at"]) < _CACHE_TTL_SECONDS:
@@ -134,13 +165,21 @@ async def get_species_info(species_name: str) -> dict:
     debug_attempts = []
 
     async with httpx.AsyncClient(timeout=8.0) as client:
-        # Try the scientific name first (more likely to be an exact,
-        # unambiguous Wikipedia title), then fall back to the common name.
-        wiki = await _fetch_wikipedia_summary(client, scientific_name)
-        debug_attempts.append(f"wikipedia:{scientific_name} -> {'hit' if wiki else 'miss'}")
-        if wiki is None and common_name != scientific_name:
-            wiki = await _fetch_wikipedia_summary(client, common_name)
-            debug_attempts.append(f"wikipedia:{common_name} -> {'hit' if wiki else 'miss'}")
+        # These three calls are fully independent of each other — none of
+        # them needs another's result — so run them concurrently instead
+        # of sequentially. Previously this was three separate `await`s
+        # back to back, meaning total latency was the SUM of all three
+        # (worst case ~24s at the 8s-per-call timeout). Running them in
+        # parallel bounds it to whichever single call is slowest instead
+        # — the actual fix for the Species Inspector modal feeling slow.
+        (wiki, wiki_debug), (obis_results, obis_debug), (papers, papers_debug) = await asyncio.gather(
+            _fetch_wikipedia_with_fallback(client, common_name, scientific_name),
+            _fetch_obis_taxon(client, scientific_name),
+            _fetch_related_papers(client, scientific_name),
+        )
+        debug_attempts.extend(wiki_debug)
+        debug_attempts.append(obis_debug)
+        debug_attempts.append(papers_debug)
 
         if wiki:
             data["common_name"] = wiki.get("title")
@@ -157,35 +196,12 @@ async def get_species_info(species_name: str) -> dict:
             if image and image.get("source"):
                 data["diagram_url"] = image["source"]
 
-        # OBIS taxon match — free, no API key required, and the same
-        # source your bathymetry map's species markers already rely on.
-        # Confirms scientific name / taxonomic rank rather than guessing.
-        # Always query with the scientific-name half, since that's what
-        # OBIS's taxonomic backbone actually indexes on.
-        try:
-            obis_resp = await client.get(
-                "https://api.obis.org/v3/taxon/complete",
-                params={"scientificname": scientific_name},
-                headers=REQUEST_HEADERS,
-            )
-            if obis_resp.status_code == 200:
-                results = obis_resp.json().get("results", [])
-                debug_attempts.append(f"obis:{scientific_name} -> {len(results)} results")
-                if results:
-                    match = results[0]
-                    data["scientific_name"] = match.get("scientificName")
-                    data["taxon_rank"] = match.get("taxonRank")
-                    data["kingdom"] = match.get("kingdom")
-            else:
-                debug_attempts.append(f"obis:{scientific_name} -> HTTP {obis_resp.status_code}")
-        except httpx.HTTPError as e:
-            debug_attempts.append(f"obis:{scientific_name} -> error {e}")
+        if obis_results:
+            match = obis_results[0]
+            data["scientific_name"] = match.get("scientificName")
+            data["taxon_rank"] = match.get("taxonRank")
+            data["kingdom"] = match.get("kingdom")
 
-        # Related research papers — OpenAlex, keyed off the scientific
-        # name (same reasoning as OBIS: it's what the taxonomic/scholarly
-        # indexing actually matches on, not the common name).
-        papers, papers_debug = await _fetch_related_papers(client, scientific_name)
-        debug_attempts.append(papers_debug)
         if papers:
             data["research_papers"] = papers
 

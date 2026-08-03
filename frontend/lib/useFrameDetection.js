@@ -221,6 +221,12 @@ export function useFrameDetection(videoRef, { enabled = true, telemetry, alertEm
       }
     }
 
+    // Fire the first capture immediately rather than waiting for
+    // setInterval's first tick — setInterval doesn't run its callback
+    // right away, so without this the status sat on "Connecting…" for a
+    // full CAPTURE_INTERVAL_MS (2.5s) before the very first request even
+    // went out, on top of however long that request itself took.
+    captureAndSend();
     intervalId = setInterval(captureAndSend, CAPTURE_INTERVAL_MS);
 
     return () => {
