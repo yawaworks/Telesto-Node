@@ -466,6 +466,17 @@ export default function MissionControl() {
     runSpeciesSearch(speciesQuery);
   }
 
+  // Passed into DetectionOverlay's Species Inspector modal as
+  // onViewDistribution — switches to Bathymetry Map and immediately
+  // searches for this species there, reusing the map's existing
+  // fetch/fit-bounds logic rather than duplicating a second, redundant
+  // distribution-map feature inside the modal itself.
+  function handleViewDistribution(scientificName) {
+    setViewMode("map");
+    setSpeciesQuery(scientificName);
+    runSpeciesSearch(scientificName);
+  }
+
   async function handleExportReport() {
     setExportingReport(true);
     try {
@@ -573,6 +584,7 @@ export default function MissionControl() {
         videoRef={videoRef}
         boxes={isMapMode ? [] : boxes}
         ghostBoxes={isMapMode ? [] : ghostBoxes}
+        onViewDistribution={handleViewDistribution}
       />
 
       <div

@@ -27,6 +27,34 @@ const CAPTURE_PADDING_PX = 8;
 const LOCK_ON_THRESHOLD = 0.9;
 const LOCK_ON_BRACKET_LEN = 16;
 
+// IUCN Red List category codes -> readable label + color. Red/orange for
+// genuinely threatened categories, neutral for everything else — this is
+// the one place in the modal where color carries real informational
+// weight (endangered vs. not), so it's worth getting the mapping right
+// rather than treating it as just another gray text field.
+const IUCN_STATUS_LABELS = {
+  EX: "Extinct",
+  EW: "Extinct in the Wild",
+  CR: "Critically Endangered",
+  EN: "Endangered",
+  VU: "Vulnerable",
+  NT: "Near Threatened",
+  LC: "Least Concern",
+  DD: "Data Deficient",
+  NE: "Not Evaluated",
+};
+const IUCN_STATUS_COLORS = {
+  EX: "text-[#c47a6e] font-bold",
+  EW: "text-[#c47a6e] font-bold",
+  CR: "text-[#c47a6e] font-bold",
+  EN: "text-[#d8a877]",
+  VU: "text-[#d8b877]",
+  NT: "text-[#b7c4cc]",
+  LC: "text-[#7de88f]",
+  DD: "text-[#5a6a72]",
+  NE: "text-[#5a6a72]",
+};
+
 /**
  * Renders YOLO bounding boxes on a <canvas> positioned exactly over the
  * given <video> element. Boxes are in the original frame's pixel space
@@ -46,7 +74,7 @@ const LOCK_ON_BRACKET_LEN = 16;
  * research papers (OpenAlex). The modal stays open until closed — no
  * hover-tracking needed, since it isn't chasing the cursor around.
  */
-export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
+export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [], onViewDistribution }) {
   const canvasRef = useRef(null);
   const captureCanvasRef = useRef(null); // offscreen, used only for cropping — never rendered directly
   const scaledBoxesRef = useRef([]); // last-drawn boxes (real + ghost) in canvas pixel space, for hit-testing
@@ -454,8 +482,29 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
                     {speciesData.kingdom && (
                       <p><span className="text-[#8fa3ad]">Kingdom:</span> {speciesData.kingdom}</p>
                     )}
+                    {speciesData.conservation_status && (
+                      <p>
+                        <span className="text-[#8fa3ad]">Conservation status:</span>{" "}
+                        <span className={IUCN_STATUS_COLORS[speciesData.conservation_status] || "text-[#b7c4cc]"}>
+                          {IUCN_STATUS_LABELS[speciesData.conservation_status] || speciesData.conservation_status}
+                        </span>
+                        <span className="text-[#5a6a72]"> (IUCN Red List)</span>
+                      </p>
+                    )}
                     {speciesData.summary && <p className="pt-1">{speciesData.summary}</p>}
                   </div>
+
+                  {onViewDistribution && speciesData.scientific_name && (
+                    <button
+                      onClick={() => {
+                        onViewDistribution(speciesData.scientific_name);
+                        closeModal();
+                      }}
+                      className="w-full bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-[10px] uppercase tracking-widest text-[#b7c4cc] hover:bg-[#8fa3ad]/20"
+                    >
+                      View distribution on bathymetry map
+                    </button>
+                  )}
 
                   {/* Photos / Diagrams tabs — real multi-source galleries
                       (Wikipedia + iNaturalist for photos, Wikipedia's SVG

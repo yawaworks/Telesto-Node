@@ -24,6 +24,14 @@ REQUEST_HEADERS = {
 # usage.
 S2_API_KEY = os.getenv("S2_API_KEY", "")
 
+# Both optional, free, instant-signup keys (no approval wait like Semantic
+# Scholar) — the app works fine without them, it just skips these two
+# specific data points rather than erroring.
+# BHL: https://www.biodiversitylibrary.org/api3 (request a key on that page)
+BHL_API_KEY = os.getenv("BHL_API_KEY", "")
+# IUCN Red List: https://api.iucnredlist.org (request a token)
+IUCN_API_KEY = os.getenv("IUCN_API_KEY", "")
+
 
 async def _get_with_retry(client: httpx.AsyncClient, url: str, **kwargs):
     """GET with a couple of short retries specifically for HTTP 429 —
@@ -420,6 +428,82 @@ def _classify_wikipedia_image(url: str) -> str:
     return "diagram" if url.lower().endswith(".svg") else "photo"
 
 
+async def _fetch_bhl_illustration(client: httpx.AsyncClient, scientific_name: str):
+    """Biodiversity Heritage Library — a genuinely unique source no other
+    integration here provides: scanned pages from the historical
+    literature, often including the original type-description plate for
+    a species. Skipped silently (not an error) if BHL_API_KEY isn't set,
+    since this is optional reference material, not core functionality."""
+    if not BHL_API_KEY:
+        return None, "bhl: skipped (no BHL_API_KEY set)"
+    try:
+        resp = await _get_with_retry(
+            client,
+            "https://www.biodiversitylibrary.org/api3",
+            params={
+                "op": "PublicationSearch",
+                "searchterm": scientific_name,
+                "searchtype": "F",  # full-text search
+                "apikey": BHL_API_KEY,
+                "format": "json",
+            },
+            headers=REQUEST_HEADERS,
+        )
+        if resp.status_code != 200:
+            return None, f"bhl:{scientific_name} -> HTTP {resp.status_code}"
+
+        payload = resp.json()
+        results = payload.get("Result") or []
+        for item in results:
+            page_id = item.get("PrimaryPageID") or item.get("PageID")
+            if page_id:
+                # BHL's page-image endpoint serves a scanned page directly
+                # as an image — no extra lookup needed once we have an ID.
+                return (
+                    {
+                        "url": f"https://www.biodiversitylibrary.org/pageimage/{page_id}",
+                        "attribution": f"Biodiversity Heritage Library — {item.get('TitleName', 'historical literature')}",
+                    },
+                    f"bhl:{scientific_name} -> found page {page_id}",
+                )
+        return None, f"bhl:{scientific_name} -> no page image found"
+    except Exception as e:
+        return None, f"bhl:{scientific_name} -> error {type(e).__name__}: {e}"
+
+
+async def _fetch_iucn_status(client: httpx.AsyncClient, scientific_name: str):
+    """IUCN Red List conservation status — Least Concern through Extinct.
+    Skipped silently if IUCN_API_KEY isn't set, same reasoning as BHL:
+    optional enrichment, not something the app should error over."""
+    if not IUCN_API_KEY:
+        return None, "iucn: skipped (no IUCN_API_KEY set)"
+    try:
+        parts = scientific_name.split(" ", 1)
+        if len(parts) != 2:
+            return None, f"iucn:{scientific_name} -> name isn't genus+species, skipped"
+        genus, species = parts
+        resp = await _get_with_retry(
+            client,
+            f"https://api.iucnredlist.org/api/v4/taxa/scientific_name",
+            params={"genus_name": genus, "species_name": species},
+            headers={**REQUEST_HEADERS, "Authorization": IUCN_API_KEY},
+        )
+        if resp.status_code != 200:
+            return None, f"iucn:{scientific_name} -> HTTP {resp.status_code}"
+
+        assessments = resp.json().get("assessments") or []
+        if not assessments:
+            return None, f"iucn:{scientific_name} -> no assessment found"
+
+        latest = assessments[0]
+        category = latest.get("red_list_category", {}).get("code")
+        if not category:
+            return None, f"iucn:{scientific_name} -> assessment missing category"
+        return category, f"iucn:{scientific_name} -> {category}"
+    except Exception as e:
+        return None, f"iucn:{scientific_name} -> error {type(e).__name__}: {e}"
+
+
 async def get_species_info(species_name: str) -> dict:
     cached = _cache.get(species_name)
     if cached and (time.time() - cached["cached_at"]) < _CACHE_TTL_SECONDS:
@@ -448,6 +532,8 @@ async def get_species_info(species_name: str) -> dict:
             (s2_papers, s2_debug),
             (crossref_papers, crossref_debug),
             (inat_photos, inat_debug),
+            (bhl_illustration, bhl_debug),
+            (iucn_status, iucn_debug),
         ) = await asyncio.gather(
             _fetch_wikipedia_with_fallback(client, common_name, scientific_name),
             _fetch_obis_taxon(client, scientific_name),
@@ -455,6 +541,8 @@ async def get_species_info(species_name: str) -> dict:
             _fetch_semantic_scholar_papers(client, scientific_name),
             _fetch_crossref_papers(client, scientific_name),
             _fetch_inaturalist_photos(client, scientific_name),
+            _fetch_bhl_illustration(client, scientific_name),
+            _fetch_iucn_status(client, scientific_name),
         )
         debug_attempts.extend(wiki_debug)
         debug_attempts.append(obis_debug)
@@ -462,6 +550,8 @@ async def get_species_info(species_name: str) -> dict:
         debug_attempts.append(s2_debug)
         debug_attempts.append(crossref_debug)
         debug_attempts.append(inat_debug)
+        debug_attempts.append(bhl_debug)
+        debug_attempts.append(iucn_debug)
 
         photos = []
         diagrams = []
@@ -496,16 +586,32 @@ async def get_species_info(species_name: str) -> dict:
         # image still appears first.
         photos.extend(inat_photos)
 
+        # BHL's historical illustration (often the original type
+        # description plate) goes into the same Diagrams tab as
+        # Wikipedia's SVG technical images — both are "reference
+        # illustration" rather than "photo of the living animal."
+        if bhl_illustration:
+            diagrams.append(bhl_illustration)
+
         if photos:
             data["photos"] = photos
         if diagrams:
             data["diagrams"] = diagrams
+
+        if iucn_status:
+            data["conservation_status"] = iucn_status
 
         if obis_results:
             match = obis_results[0]
             data["scientific_name"] = match.get("scientificName")
             data["taxon_rank"] = match.get("taxonRank")
             data["kingdom"] = match.get("kingdom")
+        else:
+            # No confirmed taxonomic match, but the frontend's "View
+            # Distribution" button still needs SOME name to search the
+            # bathymetry map with — better to use our best-guess parsed
+            # name than leave it with nothing to search for.
+            data["scientific_name"] = scientific_name
 
         # Merge all three paper sources, deduping by a normalized title so
         # the same paper indexed in more than one source doesn't show up
@@ -533,6 +639,6 @@ async def get_species_info(species_name: str) -> dict:
     # the frontend modal doesn't render this field.
     data["_debug"] = debug_attempts
 
-    data["_source"] = "wikipedia_obis_openalex_semanticscholar_crossref_inaturalist"
+    data["_source"] = "wikipedia_obis_openalex_semanticscholar_crossref_inaturalist_bhl_iucn"
     _cache[species_name] = {"data": data, "cached_at": time.time()}
     return data
