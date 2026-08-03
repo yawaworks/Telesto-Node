@@ -140,6 +140,61 @@ async def _fetch_related_papers(client: httpx.AsyncClient, scientific_name: str)
         return [], f"openalex:{scientific_name} -> error {type(e).__name__}: {e}"
 
 
+def _clean_s2_authors(paper: dict, max_authors: int = 3) -> str:
+    authors = paper.get("authors") or []
+    names = [a.get("name") for a in authors[:max_authors] if a.get("name")]
+    if not names:
+        return ""
+    suffix = " et al." if len(authors) > max_authors else ""
+    return ", ".join(names) + suffix
+
+
+def _s2_link(paper: dict) -> str | None:
+    doi = (paper.get("externalIds") or {}).get("DOI")
+    if doi:
+        return f"https://doi.org/{doi}"
+    return paper.get("url")  # Semantic Scholar's own paper page as fallback
+
+
+async def _fetch_semantic_scholar_papers(client: httpx.AsyncClient, scientific_name: str):
+    """Second, independent paper source — Semantic Scholar's free Graph
+    API, no key required for this volume of use. Runs concurrently with
+    OpenAlex (not as a sequential fallback only tried after OpenAlex
+    fails) so a rate-limit or outage on one source doesn't cost extra
+    latency waiting to try the other; results from both are merged in
+    get_species_info."""
+    try:
+        resp = await client.get(
+            "https://api.semanticscholar.org/graph/v1/paper/search",
+            params={
+                "query": scientific_name,
+                "limit": _MAX_PAPERS,
+                "fields": "title,year,authors,url,externalIds",
+            },
+            headers=REQUEST_HEADERS,
+        )
+        if resp.status_code != 200:
+            return [], f"semanticscholar:{scientific_name} -> HTTP {resp.status_code}"
+
+        results = resp.json().get("data", [])
+        papers = []
+        for paper in results:
+            title = (paper.get("title") or "").strip()
+            if not title:
+                continue
+            papers.append(
+                {
+                    "title": title,
+                    "year": paper.get("year"),
+                    "authors": _clean_s2_authors(paper),
+                    "url": _s2_link(paper),
+                }
+            )
+        return papers, f"semanticscholar:{scientific_name} -> {len(papers)} results"
+    except Exception as e:
+        return [], f"semanticscholar:{scientific_name} -> error {type(e).__name__}: {e}"
+
+
 async def _fetch_wikipedia_with_fallback(client: httpx.AsyncClient, common_name: str, scientific_name: str):
     """Bundles the "try scientific name, fall back to common name" logic
     into one coroutine so the whole thing can run as a single unit inside
@@ -180,21 +235,29 @@ async def get_species_info(species_name: str) -> dict:
     debug_attempts = []
 
     async with httpx.AsyncClient(timeout=8.0) as client:
-        # These three calls are fully independent of each other — none of
+        # These four calls are fully independent of each other — none of
         # them needs another's result — so run them concurrently instead
-        # of sequentially. Previously this was three separate `await`s
-        # back to back, meaning total latency was the SUM of all three
-        # (worst case ~24s at the 8s-per-call timeout). Running them in
-        # parallel bounds it to whichever single call is slowest instead
-        # — the actual fix for the Species Inspector modal feeling slow.
-        (wiki, wiki_debug), (obis_results, obis_debug), (papers, papers_debug) = await asyncio.gather(
+        # of sequentially. Two separate paper sources (OpenAlex and
+        # Semantic Scholar) run in parallel too, not one as a fallback
+        # tried only after the other fails — that would cost extra
+        # latency on every miss; running both up front costs nothing
+        # extra since they're concurrent anyway, and gives real
+        # redundancy against either source's outages/rate limits.
+        (
+            (wiki, wiki_debug),
+            (obis_results, obis_debug),
+            (openalex_papers, openalex_debug),
+            (s2_papers, s2_debug),
+        ) = await asyncio.gather(
             _fetch_wikipedia_with_fallback(client, common_name, scientific_name),
             _fetch_obis_taxon(client, scientific_name),
             _fetch_related_papers(client, scientific_name),
+            _fetch_semantic_scholar_papers(client, scientific_name),
         )
         debug_attempts.extend(wiki_debug)
         debug_attempts.append(obis_debug)
-        debug_attempts.append(papers_debug)
+        debug_attempts.append(openalex_debug)
+        debug_attempts.append(s2_debug)
 
         if wiki:
             data["common_name"] = wiki.get("title")
@@ -217,8 +280,23 @@ async def get_species_info(species_name: str) -> dict:
             data["taxon_rank"] = match.get("taxonRank")
             data["kingdom"] = match.get("kingdom")
 
-        if papers:
-            data["research_papers"] = papers
+        # Merge both paper sources, deduping by a normalized title so the
+        # same paper indexed in both OpenAlex and Semantic Scholar doesn't
+        # show up twice. OpenAlex results are listed first (arbitrary but
+        # consistent ordering), capped at _MAX_PAPERS total.
+        seen_titles = set()
+        merged_papers = []
+        for paper in openalex_papers + s2_papers:
+            key = paper["title"].strip().lower()
+            if key in seen_titles:
+                continue
+            seen_titles.add(key)
+            merged_papers.append(paper)
+            if len(merged_papers) >= _MAX_PAPERS:
+                break
+
+        if merged_papers:
+            data["research_papers"] = merged_papers
 
     if len(data) <= 1:
         data["error"] = "No information found for this species"
@@ -229,6 +307,6 @@ async def get_species_info(species_name: str) -> dict:
     # the frontend modal doesn't render this field.
     data["_debug"] = debug_attempts
 
-    data["_source"] = "wikipedia_obis_openalex"
+    data["_source"] = "wikipedia_obis_openalex_semanticscholar"
     _cache[species_name] = {"data": data, "cached_at": time.time()}
     return data
