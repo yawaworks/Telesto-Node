@@ -26,15 +26,26 @@ _MAX_PAPERS = 4
 
 
 def _split_label(species_name: str):
-    """Detection labels here come formatted as "Common Name_Scientific name"
-    (e.g. "Regal Tang_Paracanthurus hepatus"), not a single clean name. Pull
-    both halves apart so each can be tried separately — Wikipedia article
-    titles usually match either the common name or the scientific name, but
-    essentially never the combined underscore-joined string."""
+    """Detection labels here come formatted as "Common-Name_Scientific-name"
+    (e.g. "Tomato-Clownfish_Amphiprion-frenatus") — hyphens standing in for
+    spaces within each name segment (a common constraint on model class
+    names, which often can't contain literal spaces), and an underscore
+    separating the common name from the scientific name.
+
+    This was silently breaking EVERY downstream lookup: "Amphiprion-frenatus"
+    matches nothing on Wikipedia, OBIS, OpenAlex, or Semantic Scholar — none
+    of them treat a hyphen as a word-space substitute the way this label
+    format does. Converting hyphens back to real spaces here, once, before
+    any of those lookups happens, is the actual fix — not a rate-limit or
+    API-specific issue, everything downstream was just searching for a
+    string that doesn't exist anywhere."""
     if "_" in species_name:
         common, _, scientific = species_name.partition("_")
-        return common.strip(), scientific.strip()
-    return species_name.strip(), species_name.strip()
+    else:
+        common, scientific = species_name, species_name
+    common = common.strip().replace("-", " ")
+    scientific = scientific.strip().replace("-", " ")
+    return common, scientific
 
 
 async def _fetch_wikipedia_summary(client: httpx.AsyncClient, title: str):

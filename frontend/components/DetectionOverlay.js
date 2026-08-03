@@ -179,7 +179,7 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
         }
 
         const labelText = isLockedOn
-          ? `🎯 ${label} ${(confidence * 100).toFixed(0)}%`
+          ? `LOCKED: ${label} ${(confidence * 100).toFixed(0)}%`
           : `${label} ${(confidence * 100).toFixed(0)}%`;
         const tagText = "unvalidated model — click to inspect";
         ctx.font = "12px monospace";
@@ -419,7 +419,7 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
               <div>
                 <p className="text-[#d3dbe0] font-bold text-sm">{selectedBox.label}</p>
                 {selectedBox.ghost && (
-                  <p className="text-[#a48a55] mt-0.5">⏪ Rewound to last sighting</p>
+                  <p className="text-[#a48a55] mt-0.5">Rewound to last sighting</p>
                 )}
               </div>
 
