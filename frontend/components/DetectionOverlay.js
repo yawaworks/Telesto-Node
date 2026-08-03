@@ -53,6 +53,8 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
 
   const [isHoveringBox, setIsHoveringBox] = useState(false); // cursor affordance only
   const [selectedBox, setSelectedBox] = useState(null); // { label, ghost, videoTime } | null
+  const [imageTab, setImageTab] = useState("photos"); // "photos" | "diagrams"
+  const [activeImageIndex, setActiveImageIndex] = useState(0);
   const [captureDataUrl, setCaptureDataUrl] = useState(null);
   const [speciesData, setSpeciesData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -340,6 +342,8 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
 
     const video = videoRef.current;
     setCaptureDataUrl(null);
+    setImageTab("photos");
+    setActiveImageIndex(0);
     setSelectedBox({
       label: hit.label,
       ghost: !!hit.ghost,
@@ -371,6 +375,8 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
     setCaptureDataUrl(null);
     setSpeciesData(null);
     setFetchError(null);
+    setImageTab("photos");
+    setActiveImageIndex(0);
     if (abortRef.current) abortRef.current.abort();
     videoRef.current?.play().catch(() => {});
   }
@@ -391,8 +397,18 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
           className="absolute inset-0 z-30 bg-black/70 pointer-events-auto flex items-center justify-center"
           onClick={closeModal}
         >
+          <style>{`
+            .species-inspector-scroll::-webkit-scrollbar { width: 8px; }
+            .species-inspector-scroll::-webkit-scrollbar-track { background: #171d20; }
+            .species-inspector-scroll::-webkit-scrollbar-thumb {
+              background: #3a444a;
+              border-radius: 4px;
+            }
+            .species-inspector-scroll::-webkit-scrollbar-thumb:hover { background: #5a6a72; }
+            .species-inspector-scroll { scrollbar-width: thin; scrollbar-color: #3a444a #171d20; }
+          `}</style>
           <div
-            className="w-full max-w-sm max-h-[80vh] overflow-y-auto bg-[#1c2226] border border-[#3a444a] rounded-xl font-mono text-xs"
+            className="species-inspector-scroll w-full max-w-sm max-h-[80vh] overflow-y-auto bg-[#1c2226] border border-[#3a444a] rounded-xl font-mono text-xs"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-4 py-3 border-b border-[#3a444a] sticky top-0 bg-[#1c2226]">
@@ -441,22 +457,83 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
                     {speciesData.summary && <p className="pt-1">{speciesData.summary}</p>}
                   </div>
 
-                  {/* Research diagram — Wikipedia's article image, via
-                      species_info.py's diagram_url field. */}
-                  <div className="pt-1.5 border-t border-[#3a444a]">
-                    <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad] mb-1.5">
-                      Research diagram
-                    </p>
-                    {speciesData.diagram_url ? (
-                      <img
-                        src={speciesData.diagram_url}
-                        alt={`Reference diagram for ${speciesData.scientific_name || selectedBox.label}`}
-                        className="w-full max-h-48 object-contain rounded-md bg-[#0c1113] border border-[#3a444a]"
-                      />
-                    ) : (
-                      <p className="text-[#5a6a72]">No diagram available for this species.</p>
-                    )}
-                  </div>
+                  {/* Photos / Diagrams tabs — real multi-source galleries
+                      (Wikipedia + iNaturalist for photos, Wikipedia's SVG
+                      technical images for diagrams) instead of a single
+                      possibly-unrepresentative generic image. Only tabs
+                      with actual content are shown. */}
+                  {(speciesData.photos?.length > 0 || speciesData.diagrams?.length > 0) && (
+                    <div className="pt-1.5 border-t border-[#3a444a]">
+                      <div className="flex gap-1 mb-2">
+                        {speciesData.photos?.length > 0 && (
+                          <button
+                            onClick={() => {
+                              setImageTab("photos");
+                              setActiveImageIndex(0);
+                            }}
+                            className={`px-2.5 py-1 rounded text-[10px] uppercase tracking-widest border ${
+                              imageTab === "photos"
+                                ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
+                                : "bg-white/[0.04] border-[#3a444a] text-[#8fa3ad] hover:bg-white/[0.08]"
+                            }`}
+                          >
+                            Photos ({speciesData.photos.length})
+                          </button>
+                        )}
+                        {speciesData.diagrams?.length > 0 && (
+                          <button
+                            onClick={() => {
+                              setImageTab("diagrams");
+                              setActiveImageIndex(0);
+                            }}
+                            className={`px-2.5 py-1 rounded text-[10px] uppercase tracking-widest border ${
+                              imageTab === "diagrams"
+                                ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
+                                : "bg-white/[0.04] border-[#3a444a] text-[#8fa3ad] hover:bg-white/[0.08]"
+                            }`}
+                          >
+                            Diagrams ({speciesData.diagrams.length})
+                          </button>
+                        )}
+                      </div>
+
+                      {(() => {
+                        const gallery = imageTab === "diagrams" ? speciesData.diagrams : speciesData.photos;
+                        if (!gallery?.length) return null;
+                        const active = gallery[Math.min(activeImageIndex, gallery.length - 1)];
+                        return (
+                          <>
+                            <img
+                              src={active.url}
+                              alt={`${imageTab === "diagrams" ? "Diagram" : "Photo"} of ${speciesData.scientific_name || selectedBox.label}`}
+                              className={`w-full rounded-md border border-[#3a444a] ${
+                                imageTab === "diagrams"
+                                  ? "max-h-48 object-contain bg-[#0c1113]"
+                                  : "h-40 object-cover"
+                              }`}
+                            />
+                            <p className="text-[#5a6a72] mt-1">{active.attribution}</p>
+
+                            {gallery.length > 1 && (
+                              <div className="flex gap-1.5 mt-2 overflow-x-auto pb-1">
+                                {gallery.map((img, i) => (
+                                  <button
+                                    key={i}
+                                    onClick={() => setActiveImageIndex(i)}
+                                    className={`shrink-0 w-12 h-12 rounded overflow-hidden border-2 ${
+                                      i === activeImageIndex ? "border-[#8fa3ad]" : "border-transparent opacity-60 hover:opacity-100"
+                                    }`}
+                                  >
+                                    <img src={img.url} alt="" className="w-full h-full object-cover" />
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                  )}
 
                   {/* Research papers — real OpenAlex results from
                       species_info.py, not a placeholder search link. */}

@@ -346,6 +346,80 @@ async def _fetch_obis_taxon(client: httpx.AsyncClient, scientific_name: str):
         return [], f"obis:{scientific_name} -> error {type(e).__name__}: {e}"
 
 
+# How many real photos to surface in the Photos tab. iNaturalist taxa can
+# have dozens of community-contributed photos; keep this small — a
+# reference gallery, not every photo ever uploaded.
+_MAX_PHOTOS = 8
+
+
+async def _fetch_inaturalist_photos(client: httpx.AsyncClient, scientific_name: str):
+    """iNaturalist indexes MULTIPLE real, community-contributed photos per
+    taxon (not just one) — a genuinely better fit for a researcher-facing
+    "Photos" tab than a single Wikipedia lead image, which is often a
+    generic or unrepresentative shot chosen for the article's infobox
+    rather than for taxonomic clarity.
+
+    Two-step lookup: first find the taxon ID via a name search, then fetch
+    that taxon's full record (which includes its photo array — the search
+    endpoint alone doesn't return the full gallery)."""
+    try:
+        search_resp = await _get_with_retry(
+            client,
+            "https://api.inaturalist.org/v1/taxa",
+            params={"q": scientific_name, "per_page": 1, "rank": "species"},
+            headers=REQUEST_HEADERS,
+        )
+        if search_resp.status_code != 200:
+            return [], f"inaturalist:{scientific_name} -> HTTP {search_resp.status_code} (search)"
+
+        search_results = search_resp.json().get("results", [])
+        if not search_results:
+            return [], f"inaturalist:{scientific_name} -> no taxon match"
+
+        taxon_id = search_results[0].get("id")
+        if not taxon_id:
+            return [], f"inaturalist:{scientific_name} -> taxon match has no id"
+
+        detail_resp = await _get_with_retry(
+            client,
+            f"https://api.inaturalist.org/v1/taxa/{taxon_id}",
+            headers=REQUEST_HEADERS,
+        )
+        if detail_resp.status_code != 200:
+            return [], f"inaturalist:{scientific_name} -> HTTP {detail_resp.status_code} (detail)"
+
+        detail_results = detail_resp.json().get("results", [])
+        if not detail_results:
+            return [], f"inaturalist:{scientific_name} -> no taxon detail"
+
+        taxon_photos = detail_results[0].get("taxon_photos", [])
+        photos = []
+        for tp in taxon_photos[:_MAX_PHOTOS]:
+            photo = tp.get("photo", {})
+            url = photo.get("medium_url") or photo.get("square_url")
+            if not url:
+                continue
+            photos.append(
+                {
+                    "url": url,
+                    "attribution": photo.get("attribution") or "iNaturalist contributor",
+                }
+            )
+        return photos, f"inaturalist:{scientific_name} -> {len(photos)} photos"
+    except Exception as e:
+        return [], f"inaturalist:{scientific_name} -> error {type(e).__name__}: {e}"
+
+
+def _classify_wikipedia_image(url: str) -> str:
+    """Wikipedia's lead image is usually a real photo, but is sometimes a
+    diagram, distribution map, or anatomical illustration — those are
+    almost always served as SVG, while real photos are virtually always
+    raster (JPG/PNG). This is a genuine, checkable signal, not a guess:
+    file extension reliably distinguishes the two categories in practice
+    for Wikipedia's media."""
+    return "diagram" if url.lower().endswith(".svg") else "photo"
+
+
 async def get_species_info(species_name: str) -> dict:
     cached = _cache.get(species_name)
     if cached and (time.time() - cached["cached_at"]) < _CACHE_TTL_SECONDS:
@@ -373,18 +447,24 @@ async def get_species_info(species_name: str) -> dict:
             (openalex_papers, openalex_debug),
             (s2_papers, s2_debug),
             (crossref_papers, crossref_debug),
+            (inat_photos, inat_debug),
         ) = await asyncio.gather(
             _fetch_wikipedia_with_fallback(client, common_name, scientific_name),
             _fetch_obis_taxon(client, scientific_name),
             _fetch_related_papers(client, scientific_name),
             _fetch_semantic_scholar_papers(client, scientific_name),
             _fetch_crossref_papers(client, scientific_name),
+            _fetch_inaturalist_photos(client, scientific_name),
         )
         debug_attempts.extend(wiki_debug)
         debug_attempts.append(obis_debug)
         debug_attempts.append(openalex_debug)
         debug_attempts.append(s2_debug)
         debug_attempts.append(crossref_debug)
+        debug_attempts.append(inat_debug)
+
+        photos = []
+        diagrams = []
 
         if wiki:
             data["common_name"] = wiki.get("title")
@@ -392,14 +472,34 @@ async def get_species_info(species_name: str) -> dict:
             data["wikipedia_url"] = (
                 wiki.get("content_urls", {}).get("desktop", {}).get("page")
             )
-            # Wikipedia's summary API already includes an image if the
-            # article has one — "originalimage" (full-res) is preferred
-            # over "thumbnail" (Wikipedia's smaller default crop) when
-            # both are present, since it renders better at the modal's
-            # larger display size.
+            # Wikipedia's summary API includes an image if the article has
+            # one — "originalimage" (full-res) is preferred over
+            # "thumbnail" when both are present. Classified as photo vs
+            # diagram (see _classify_wikipedia_image) rather than always
+            # treated as a generic "diagram" regardless of what it
+            # actually is — a real animal photo and a distribution-map
+            # SVG are not the same kind of reference material, and a
+            # researcher wants them in different places, not one lumped
+            # "image" slot.
             image = wiki.get("originalimage") or wiki.get("thumbnail")
             if image and image.get("source"):
-                data["diagram_url"] = image["source"]
+                url = image["source"]
+                entry = {"url": url, "attribution": "Wikipedia"}
+                if _classify_wikipedia_image(url) == "diagram":
+                    diagrams.append(entry)
+                else:
+                    photos.append(entry)
+
+        # Real community-contributed photos from iNaturalist — a genuine
+        # gallery, not a single possibly-unrepresentative image. Listed
+        # after the Wikipedia photo (if any) so the most likely canonical
+        # image still appears first.
+        photos.extend(inat_photos)
+
+        if photos:
+            data["photos"] = photos
+        if diagrams:
+            data["diagrams"] = diagrams
 
         if obis_results:
             match = obis_results[0]
@@ -433,6 +533,6 @@ async def get_species_info(species_name: str) -> dict:
     # the frontend modal doesn't render this field.
     data["_debug"] = debug_attempts
 
-    data["_source"] = "wikipedia_obis_openalex_semanticscholar_crossref"
+    data["_source"] = "wikipedia_obis_openalex_semanticscholar_crossref_inaturalist"
     _cache[species_name] = {"data": data, "cached_at": time.time()}
     return data
