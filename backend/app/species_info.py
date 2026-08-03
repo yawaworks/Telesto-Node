@@ -100,6 +100,13 @@ async def _fetch_related_papers(client: httpx.AsyncClient, scientific_name: str)
                 "search": scientific_name,
                 "per-page": _MAX_PAPERS,
                 "sort": "relevance_score:desc",
+                # OpenAlex's documented "polite pool" mechanism — a
+                # mailto query param gets a much higher, dedicated rate
+                # limit than the shared anonymous pool. Having the
+                # contact email only in the User-Agent header wasn't
+                # enough; this is the actual documented requirement and
+                # is what was causing HTTP 429s.
+                "mailto": "yashikayapsandworks@gmail.com",
             },
             headers=REQUEST_HEADERS,
         )
