@@ -1,27 +1,35 @@
 import time
 import httpx
 
+# Wikimedia's API etiquette policy requires a descriptive User-Agent
+# identifying the application and a contact method — requests without one
+# can be throttled or rejected outright. This was the actual cause of
+# "no information found" showing up even for real, well-documented species.
+# OpenAlex's "polite pool" (faster, more reliable rate limits) also keys
+# off a contact email being present somewhere in the request — including
+# it in the User-Agent here covers both.
 REQUEST_HEADERS = {
-    # OpenAlex specifically parses for the "mailto:" token to grant polite-
-    # pool access (faster, more consistent rate limits) — a plain "contact:"
-    # label doesn't trigger it. Wikipedia doesn't need this token, it just
-    # wants a real identifying UA string, so this format satisfies both.
     "User-Agent": "TelestoNode/1.0 (marine ecosystem monitoring research tool; "
-                  "mailto:yashikayapsandworks@gmail.com)"
+                  "contact: yashikayapsandworks@gmail.com)"
 }
 
-# Also passed as an explicit query param on OpenAlex calls specifically —
-# belt-and-suspenders, since the mailto param is OpenAlex's more reliably
-# documented mechanism and costs nothing to include alongside the header.
-OPENALEX_CONTACT_EMAIL = "yashikayapsandworks@gmail.com"
-
+# In-process cache keyed by species label. Resets on redeploy/restart —
+# fine here since all upstream sources are free and fast; this just
+# avoids redundant round-trips while the process is warm.
 _cache = {}
-_CACHE_TTL_SECONDS = 60 * 60 * 24        # 24h — for genuinely complete results
-_FAILURE_CACHE_TTL_SECONDS = 60          # 60s — for results where an upstream call errored, so a transient failure doesn't lock a species out for a full day
+_CACHE_TTL_SECONDS = 60 * 60 * 24  # 24h
+
+# How many related papers to surface in the tooltip. Kept small — this is
+# a hover popup, not a literature review.
 _MAX_PAPERS = 4
 
 
 def _split_label(species_name: str):
+    """Detection labels here come formatted as "Common Name_Scientific name"
+    (e.g. "Regal Tang_Paracanthurus hepatus"), not a single clean name. Pull
+    both halves apart so each can be tried separately — Wikipedia article
+    titles usually match either the common name or the scientific name, but
+    essentially never the combined underscore-joined string."""
     if "_" in species_name:
         common, _, scientific = species_name.partition("_")
         return common.strip(), scientific.strip()
@@ -36,6 +44,10 @@ async def _fetch_wikipedia_summary(client: httpx.AsyncClient, title: str):
         )
         if resp.status_code == 200:
             payload = resp.json()
+            # Wikipedia returns 200 with a "type": "disambiguation" or
+            # missing "extract" for pages that don't actually describe the
+            # species — treat those as a miss so we fall through to the
+            # other name variant instead of showing a useless summary.
             if payload.get("extract"):
                 return payload
     except httpx.HTTPError:
@@ -62,6 +74,9 @@ def _clean_openalex_authors(work: dict, max_authors: int = 3) -> str:
 
 
 def _openalex_link(work: dict) -> str | None:
+    # Prefer a direct landing page (often open-access or the publisher's
+    # page) over a bare DOI URL, since it's more likely to actually be
+    # readable without a paywall prompt.
     primary = work.get("primary_location") or {}
     landing = primary.get("landing_page_url")
     if landing:
@@ -69,13 +84,14 @@ def _openalex_link(work: dict) -> str | None:
     doi = work.get("doi")
     if doi:
         return doi if doi.startswith("http") else f"https://doi.org/{doi}"
-    return work.get("id")
+    return work.get("id")  # OpenAlex work ID URL as a last resort
 
 
 async def _fetch_related_papers(client: httpx.AsyncClient, scientific_name: str):
-    """Returns (papers, debug_string, had_error). had_error distinguishes
-    "genuinely zero papers exist" from "the request failed" — the caller
-    uses this to decide how long to cache the result."""
+    """Free, no-API-key search against OpenAlex — a large open catalog of
+    scholarly works. Used here purely for "does published research mention
+    this species" relevance, not as a claim that Telesto Node's own
+    detections are validated by these papers."""
     try:
         resp = await client.get(
             "https://api.openalex.org/works",
@@ -83,12 +99,11 @@ async def _fetch_related_papers(client: httpx.AsyncClient, scientific_name: str)
                 "search": scientific_name,
                 "per-page": _MAX_PAPERS,
                 "sort": "relevance_score:desc",
-                "mailto": OPENALEX_CONTACT_EMAIL,
             },
             headers=REQUEST_HEADERS,
         )
         if resp.status_code != 200:
-            return [], f"openalex:{scientific_name} -> HTTP {resp.status_code}", True
+            return [], f"openalex:{scientific_name} -> HTTP {resp.status_code}"
 
         results = resp.json().get("results", [])
         papers = []
@@ -104,22 +119,23 @@ async def _fetch_related_papers(client: httpx.AsyncClient, scientific_name: str)
                     "url": _openalex_link(work),
                 }
             )
-        return papers, f"openalex:{scientific_name} -> {len(papers)} results", False
+        return papers, f"openalex:{scientific_name} -> {len(papers)} results"
     except httpx.HTTPError as e:
-        return [], f"openalex:{scientific_name} -> error {e}", True
+        return [], f"openalex:{scientific_name} -> error {e}"
 
 
 async def get_species_info(species_name: str) -> dict:
     cached = _cache.get(species_name)
-    if cached and (time.time() - cached["cached_at"]) < cached["ttl"]:
+    if cached and (time.time() - cached["cached_at"]) < _CACHE_TTL_SECONDS:
         return cached["data"]
 
     common_name, scientific_name = _split_label(species_name)
     data = {"query": species_name}
     debug_attempts = []
-    had_any_error = False
 
     async with httpx.AsyncClient(timeout=8.0) as client:
+        # Try the scientific name first (more likely to be an exact,
+        # unambiguous Wikipedia title), then fall back to the common name.
         wiki = await _fetch_wikipedia_summary(client, scientific_name)
         debug_attempts.append(f"wikipedia:{scientific_name} -> {'hit' if wiki else 'miss'}")
         if wiki is None and common_name != scientific_name:
@@ -132,10 +148,20 @@ async def get_species_info(species_name: str) -> dict:
             data["wikipedia_url"] = (
                 wiki.get("content_urls", {}).get("desktop", {}).get("page")
             )
+            # Wikipedia's summary API already includes an image if the
+            # article has one — "originalimage" (full-res) is preferred
+            # over "thumbnail" (Wikipedia's smaller default crop) when
+            # both are present, since it renders better at the modal's
+            # larger display size.
             image = wiki.get("originalimage") or wiki.get("thumbnail")
             if image and image.get("source"):
                 data["diagram_url"] = image["source"]
 
+        # OBIS taxon match — free, no API key required, and the same
+        # source your bathymetry map's species markers already rely on.
+        # Confirms scientific name / taxonomic rank rather than guessing.
+        # Always query with the scientific-name half, since that's what
+        # OBIS's taxonomic backbone actually indexes on.
         try:
             obis_resp = await client.get(
                 "https://api.obis.org/v3/taxon/complete",
@@ -152,25 +178,21 @@ async def get_species_info(species_name: str) -> dict:
                     data["kingdom"] = match.get("kingdom")
             else:
                 debug_attempts.append(f"obis:{scientific_name} -> HTTP {obis_resp.status_code}")
-                had_any_error = True
         except httpx.HTTPError as e:
             debug_attempts.append(f"obis:{scientific_name} -> error {e}")
-            had_any_error = True
 
-        papers, papers_debug, papers_had_error = await _fetch_related_papers(client, scientific_name)
+        # Related research papers — OpenAlex, keyed off the scientific
+        # name (same reasoning as OBIS: it's what the taxonomic/scholarly
+        # indexing actually matches on, not the common name).
+        papers, papers_debug = await _fetch_related_papers(client, scientific_name)
         debug_attempts.append(papers_debug)
-        had_any_error = had_any_error or papers_had_error
         if papers:
             data["research_papers"] = papers
 
     if len(data) <= 1:
         data["error"] = "No information found for this species"
-        data["_debug"] = debug_attempts
+        data["_debug"] = debug_attempts  # remove once this is confirmed working end-to-end
 
     data["_source"] = "wikipedia_obis_openalex"
-
-    # Short TTL when something upstream failed, so a transient hiccup
-    # doesn't lock a species out of showing papers for a full day.
-    ttl = _FAILURE_CACHE_TTL_SECONDS if had_any_error else _CACHE_TTL_SECONDS
-    _cache[species_name] = {"data": data, "cached_at": time.time(), "ttl": ttl}
+    _cache[species_name] = {"data": data, "cached_at": time.time()}
     return data

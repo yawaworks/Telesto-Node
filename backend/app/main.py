@@ -35,6 +35,7 @@ from app.inference import clahe_correct, coral_bleaching_ratio, predict_with_rob
 from app.obis_client import fetch_obis_species_data
 from app.report import generate_mission_report, log_detections
 from app.report_email import send_mission_report_email
+from app.species_info import get_species_info
 from app.telemetry import TelemetrySimulator, MISSION_LAT, MISSION_LNG
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -546,12 +547,13 @@ async def species_data(request: Request, scientific_name: str, max_records: int 
     """Serves species location data as GeoJSON for the bathymetry map.
 
     Checks the species_cache Mongo collection first (populated every 6
-    hours by the n8n "Species Data Sync" workflow) — a cache hit avoids
-    hitting OBIS live and returns near-instantly. Falls back to a live
-    OBIS fetch on a cache miss, since the sync workflow currently only
-    keeps one species (Acropora cervicornis) fresh; a researcher
-    searching any other species should still get real results, just
-    without the speed benefit until that species is added to the sync.
+    hours by the "Species Data Sync" GitHub Actions workflow) — a cache
+    hit avoids hitting OBIS live and returns near-instantly. Falls back
+    to a live OBIS fetch on a cache miss, since the sync workflow
+    currently only keeps one species (Acropora cervicornis) fresh; a
+    researcher searching any other species should still get real
+    results, just without the speed benefit until that species is added
+    to the sync.
     """
     db = get_db()
     features = []
@@ -619,6 +621,23 @@ async def species_data(request: Request, scientific_name: str, max_records: int 
         )
 
     return {"type": "FeatureCollection", "features": features, "cached": False}
+
+
+@app.get("/species-info")
+@limiter.limit("30/minute")
+async def species_info(request: Request, name: str):
+    """Looks up a detected species by its model label (e.g.
+    "Regal Tang_Paracanthurus hepatus") and returns Wikipedia summary
+    text, taxon rank/kingdom, a reference diagram image (if Wikipedia has
+    one), and related research papers (via OpenAlex). Backs the click-to-
+    inspect "Species Inspector" modal in DetectionOverlay.js.
+
+    This is a genuinely separate concern from /species-data (which serves
+    OBIS occurrence points for the bathymetry map) — species-info is
+    about a single species' identity/reference material, not where it's
+    been sighted geographically.
+    """
+    return await get_species_info(name)
 
 
 @app.post("/internal/species-sync")
