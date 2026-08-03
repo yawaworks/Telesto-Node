@@ -637,7 +637,15 @@ async def species_info(request: Request, name: str):
     about a single species' identity/reference material, not where it's
     been sighted geographically.
     """
-    return await get_species_info(name)
+    try:
+        return await get_species_info(name)
+    except Exception as exc:
+        # get_species_info's own sub-fetches (Wikipedia/OBIS/OpenAlex)
+        # already catch their own errors and degrade individually — this
+        # is a last-resort net for anything unexpected slipping through,
+        # so a stray bug in one data source can't 500 the whole modal.
+        print(f"[species-info] Unexpected failure for '{name}': {exc}")
+        return {"query": name, "error": "Species lookup temporarily unavailable"}
 
 
 @app.post("/internal/species-sync")

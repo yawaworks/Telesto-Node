@@ -19,6 +19,14 @@ const TAG_HEIGHT = 13;
 // touch tight against the actual animal.
 const CAPTURE_PADDING_PX = 8;
 
+// At or above this confidence, a box gets the "locked on" corner-bracket
+// treatment instead of a plain rectangle — a visual cue, not a claim of
+// validation. The "unvalidated model" disclaimer stays regardless of
+// confidence; a confident guess from an unvalidated model is still an
+// unvalidated guess, just a more visually confident-looking one.
+const LOCK_ON_THRESHOLD = 0.9;
+const LOCK_ON_BRACKET_LEN = 16;
+
 /**
  * Renders YOLO bounding boxes on a <canvas> positioned exactly over the
  * given <video> element. Boxes are in the original frame's pixel space
@@ -72,12 +80,43 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
 
       const scaledBoxes = [];
 
+      /** Draws four bright L-shaped corner brackets around a box —
+       * classic target-lock HUD styling — instead of (or on top of) a
+       * plain rectangle. Used only for high-confidence detections; the
+       * "unvalidated model" disclaimer still applies regardless, this is
+       * purely a visual emphasis cue, not a claim of verification. */
+      function drawLockOnBrackets(ctx, bx, by, bw, bh) {
+        const len = Math.min(LOCK_ON_BRACKET_LEN, bw / 3, bh / 3);
+        ctx.save();
+        ctx.strokeStyle = "#7de88f";
+        ctx.lineWidth = 2.5;
+        ctx.globalAlpha = 1;
+        ctx.setLineDash([]);
+
+        const corners = [
+          // [cornerX, cornerY, horizontalDir, verticalDir]
+          [bx, by, 1, 1],
+          [bx + bw, by, -1, 1],
+          [bx, by + bh, 1, -1],
+          [bx + bw, by + bh, -1, -1],
+        ];
+        for (const [cx, cy, hDir, vDir] of corners) {
+          ctx.beginPath();
+          ctx.moveTo(cx + len * hDir, cy);
+          ctx.lineTo(cx, cy);
+          ctx.lineTo(cx, cy + len * vDir);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+
       function drawBox({ label, confidence, x1, y1, x2, y2 }, isGhost, videoTime) {
         const bx = x1 * scaleX;
         const by = y1 * scaleY;
         const bw = (x2 - x1) * scaleX;
         const bh = (y2 - y1) * scaleY;
         const lowConfidence = !isGhost && confidence < 0.75;
+        const isLockedOn = !isGhost && confidence >= LOCK_ON_THRESHOLD;
 
         // Original (unscaled) frame-pixel coordinates travel with the box
         // too — the crop capture draws from the video's native resolution,
@@ -96,6 +135,12 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
         } else if (lowConfidence) {
           ctx.setLineDash([5, 4]);
           ctx.globalAlpha = 0.7;
+        } else if (isLockedOn) {
+          // Dim the plain rectangle when locked on — the bright corner
+          // brackets drawn below carry the emphasis instead, same visual
+          // language as a camera/FPS target lock.
+          ctx.setLineDash([]);
+          ctx.globalAlpha = 0.35;
         } else {
           ctx.setLineDash([]);
           ctx.globalAlpha = 1;
@@ -103,6 +148,10 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
         ctx.strokeRect(bx, by, bw, bh);
         ctx.setLineDash([]);
         ctx.globalAlpha = 1;
+
+        if (isLockedOn) {
+          drawLockOnBrackets(ctx, bx, by, bw, bh);
+        }
 
         if (isGhost) {
           const labelText = `${label} — click to rewind`;
@@ -129,7 +178,9 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [] }) {
           return;
         }
 
-        const labelText = `${label} ${(confidence * 100).toFixed(0)}%`;
+        const labelText = isLockedOn
+          ? `🎯 ${label} ${(confidence * 100).toFixed(0)}%`
+          : `${label} ${(confidence * 100).toFixed(0)}%`;
         const tagText = "unvalidated model — click to inspect";
         ctx.font = "12px monospace";
         const labelWidth = ctx.measureText(labelText).width;

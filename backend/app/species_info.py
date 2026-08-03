@@ -121,8 +121,16 @@ async def _fetch_related_papers(client: httpx.AsyncClient, scientific_name: str)
                 }
             )
         return papers, f"openalex:{scientific_name} -> {len(papers)} results"
-    except httpx.HTTPError as e:
-        return [], f"openalex:{scientific_name} -> error {e}"
+    except Exception as e:
+        # Broadened from httpx.HTTPError: a malformed/unexpected OpenAlex
+        # response body (bad JSON, missing fields the parsing loop above
+        # assumes exist) previously wasn't caught here, since those are
+        # plain KeyError/JSONDecodeError, not HTTPError. When this ran
+        # inside asyncio.gather alongside the Wikipedia/OBIS calls, an
+        # uncaught exception here could take down the ENTIRE
+        # get_species_info() call, not just silently drop the papers
+        # section — turning "no papers found" into "whole modal errors."
+        return [], f"openalex:{scientific_name} -> error {type(e).__name__}: {e}"
 
 
 async def _fetch_wikipedia_with_fallback(client: httpx.AsyncClient, common_name: str, scientific_name: str):
@@ -151,8 +159,8 @@ async def _fetch_obis_taxon(client: httpx.AsyncClient, scientific_name: str):
             results = resp.json().get("results", [])
             return results, f"obis:{scientific_name} -> {len(results)} results"
         return [], f"obis:{scientific_name} -> HTTP {resp.status_code}"
-    except httpx.HTTPError as e:
-        return [], f"obis:{scientific_name} -> error {e}"
+    except Exception as e:
+        return [], f"obis:{scientific_name} -> error {type(e).__name__}: {e}"
 
 
 async def get_species_info(species_name: str) -> dict:
@@ -207,7 +215,12 @@ async def get_species_info(species_name: str) -> dict:
 
     if len(data) <= 1:
         data["error"] = "No information found for this species"
-        data["_debug"] = debug_attempts  # remove once this is confirmed working end-to-end
+
+    # Always attach the debug trail (not just on total failure) — this is
+    # what let us actually diagnose the papers-going-missing report
+    # instead of guessing. Only consumed by devtools/network inspection;
+    # the frontend modal doesn't render this field.
+    data["_debug"] = debug_attempts
 
     data["_source"] = "wikipedia_obis_openalex"
     _cache[species_name] = {"data": data, "cached_at": time.time()}
