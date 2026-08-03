@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 import httpx
 
@@ -13,6 +14,35 @@ REQUEST_HEADERS = {
     "User-Agent": "TelestoNode/1.0 (marine ecosystem monitoring research tool; "
                   "contact: yashikayapsandworks@gmail.com)"
 }
+
+# Optional: a free Semantic Scholar API key moves requests off the shared
+# anonymous rate-limit pool onto a dedicated per-key limit. Sign up free at
+# https://www.semanticscholar.org/product/api and set S2_API_KEY on Render.
+# Without it, this still works, just shares Render's outbound IP's rate
+# budget with every other app on Render's free tier hitting the same API —
+# which is the actual cause of the HTTP 429s seen even at low personal
+# usage.
+S2_API_KEY = os.getenv("S2_API_KEY", "")
+
+
+async def _get_with_retry(client: httpx.AsyncClient, url: str, **kwargs):
+    """GET with a couple of short retries specifically for HTTP 429 —
+    OpenAlex/Semantic Scholar rate limits on a shared free-tier IP are
+    often transient (someone else's burst of traffic, not a sustained
+    block), so waiting half a second and trying again frequently
+    succeeds where an immediate single attempt doesn't. Any other status
+    code or exception is returned/raised immediately — this only exists
+    to smooth over 429s, not to mask real failures."""
+    delays = [0.5, 1.5]
+    last_resp = None
+    for attempt in range(len(delays) + 1):
+        resp = await client.get(url, **kwargs)
+        if resp.status_code != 429:
+            return resp
+        last_resp = resp
+        if attempt < len(delays):
+            await asyncio.sleep(delays[attempt])
+    return last_resp
 
 # In-process cache keyed by species label. Resets on redeploy/restart —
 # fine here since all upstream sources are free and fast; this just
@@ -105,7 +135,8 @@ async def _fetch_related_papers(client: httpx.AsyncClient, scientific_name: str)
     this species" relevance, not as a claim that Telesto Node's own
     detections are validated by these papers."""
     try:
-        resp = await client.get(
+        resp = await _get_with_retry(
+            client,
             "https://api.openalex.org/works",
             params={
                 "search": scientific_name,
@@ -167,6 +198,81 @@ def _s2_link(paper: dict) -> str | None:
     return paper.get("url")  # Semantic Scholar's own paper page as fallback
 
 
+def _crossref_title(item: dict) -> str:
+    titles = item.get("title") or []
+    return titles[0].strip() if titles else ""
+
+
+def _crossref_year(item: dict):
+    for key in ("published-print", "published-online", "published", "issued"):
+        parts = (item.get(key) or {}).get("date-parts")
+        if parts and parts[0] and parts[0][0]:
+            return parts[0][0]
+    return None
+
+
+def _crossref_authors(item: dict, max_authors: int = 3) -> str:
+    authors = item.get("author") or []
+    names = []
+    for a in authors[:max_authors]:
+        name = " ".join(p for p in [a.get("given"), a.get("family")] if p)
+        if name:
+            names.append(name)
+    if not names:
+        return ""
+    suffix = " et al." if len(authors) > max_authors else ""
+    return ", ".join(names) + suffix
+
+
+def _crossref_link(item: dict) -> str | None:
+    doi = item.get("DOI")
+    if doi:
+        return f"https://doi.org/{doi}"
+    return item.get("URL")
+
+
+async def _fetch_crossref_papers(client: httpx.AsyncClient, scientific_name: str):
+    """Third, independent paper source — CrossRef, requiring zero signup
+    or API key at all (unlike Semantic Scholar, which needs a free but
+    approval-gated key to get a decent rate limit). Same "polite pool"
+    convention as OpenAlex: a mailto param gets a higher, more reliable
+    rate limit than fully anonymous access, with no application process.
+    This exists specifically so paper results don't depend entirely on
+    sources that need approval or are prone to shared-IP rate limiting —
+    CrossRef is available immediately, today, with no waiting."""
+    try:
+        resp = await _get_with_retry(
+            client,
+            "https://api.crossref.org/works",
+            params={
+                "query.bibliographic": scientific_name,
+                "rows": _MAX_PAPERS,
+                "mailto": "yashikayapsandworks@gmail.com",
+            },
+            headers=REQUEST_HEADERS,
+        )
+        if resp.status_code != 200:
+            return [], f"crossref:{scientific_name} -> HTTP {resp.status_code}"
+
+        items = resp.json().get("message", {}).get("items", [])
+        papers = []
+        for item in items:
+            title = _crossref_title(item)
+            if not title:
+                continue
+            papers.append(
+                {
+                    "title": title,
+                    "year": _crossref_year(item),
+                    "authors": _crossref_authors(item),
+                    "url": _crossref_link(item),
+                }
+            )
+        return papers, f"crossref:{scientific_name} -> {len(papers)} results"
+    except Exception as e:
+        return [], f"crossref:{scientific_name} -> error {type(e).__name__}: {e}"
+
+
 async def _fetch_semantic_scholar_papers(client: httpx.AsyncClient, scientific_name: str):
     """Second, independent paper source — Semantic Scholar's free Graph
     API, no key required for this volume of use. Runs concurrently with
@@ -175,14 +281,18 @@ async def _fetch_semantic_scholar_papers(client: httpx.AsyncClient, scientific_n
     latency waiting to try the other; results from both are merged in
     get_species_info."""
     try:
-        resp = await client.get(
+        headers = dict(REQUEST_HEADERS)
+        if S2_API_KEY:
+            headers["x-api-key"] = S2_API_KEY
+        resp = await _get_with_retry(
+            client,
             "https://api.semanticscholar.org/graph/v1/paper/search",
             params={
                 "query": scientific_name,
                 "limit": _MAX_PAPERS,
                 "fields": "title,year,authors,url,externalIds",
             },
-            headers=REQUEST_HEADERS,
+            headers=headers,
         )
         if resp.status_code != 200:
             return [], f"semanticscholar:{scientific_name} -> HTTP {resp.status_code}"
@@ -246,29 +356,35 @@ async def get_species_info(species_name: str) -> dict:
     debug_attempts = []
 
     async with httpx.AsyncClient(timeout=8.0) as client:
-        # These four calls are fully independent of each other — none of
+        # These five calls are fully independent of each other — none of
         # them needs another's result — so run them concurrently instead
-        # of sequentially. Two separate paper sources (OpenAlex and
-        # Semantic Scholar) run in parallel too, not one as a fallback
-        # tried only after the other fails — that would cost extra
-        # latency on every miss; running both up front costs nothing
-        # extra since they're concurrent anyway, and gives real
-        # redundancy against either source's outages/rate limits.
+        # of sequentially. Three separate paper sources (OpenAlex,
+        # Semantic Scholar, CrossRef) run in parallel too, not as
+        # fallbacks tried only after another fails — that would cost
+        # extra latency on every miss; running them all up front costs
+        # nothing extra since they're concurrent anyway, and gives real
+        # redundancy against any one source's outages, rate limits, or
+        # (for Semantic Scholar specifically) needing an approval-gated
+        # API key to get a decent limit. CrossRef needs no signup at all,
+        # so it's the one source guaranteed to be usable immediately.
         (
             (wiki, wiki_debug),
             (obis_results, obis_debug),
             (openalex_papers, openalex_debug),
             (s2_papers, s2_debug),
+            (crossref_papers, crossref_debug),
         ) = await asyncio.gather(
             _fetch_wikipedia_with_fallback(client, common_name, scientific_name),
             _fetch_obis_taxon(client, scientific_name),
             _fetch_related_papers(client, scientific_name),
             _fetch_semantic_scholar_papers(client, scientific_name),
+            _fetch_crossref_papers(client, scientific_name),
         )
         debug_attempts.extend(wiki_debug)
         debug_attempts.append(obis_debug)
         debug_attempts.append(openalex_debug)
         debug_attempts.append(s2_debug)
+        debug_attempts.append(crossref_debug)
 
         if wiki:
             data["common_name"] = wiki.get("title")
@@ -291,13 +407,12 @@ async def get_species_info(species_name: str) -> dict:
             data["taxon_rank"] = match.get("taxonRank")
             data["kingdom"] = match.get("kingdom")
 
-        # Merge both paper sources, deduping by a normalized title so the
-        # same paper indexed in both OpenAlex and Semantic Scholar doesn't
-        # show up twice. OpenAlex results are listed first (arbitrary but
-        # consistent ordering), capped at _MAX_PAPERS total.
+        # Merge all three paper sources, deduping by a normalized title so
+        # the same paper indexed in more than one source doesn't show up
+        # twice. Capped at _MAX_PAPERS total.
         seen_titles = set()
         merged_papers = []
-        for paper in openalex_papers + s2_papers:
+        for paper in openalex_papers + s2_papers + crossref_papers:
             key = paper["title"].strip().lower()
             if key in seen_titles:
                 continue
@@ -318,6 +433,6 @@ async def get_species_info(species_name: str) -> dict:
     # the frontend modal doesn't render this field.
     data["_debug"] = debug_attempts
 
-    data["_source"] = "wikipedia_obis_openalex_semanticscholar"
+    data["_source"] = "wikipedia_obis_openalex_semanticscholar_crossref"
     _cache[species_name] = {"data": data, "cached_at": time.time()}
     return data
