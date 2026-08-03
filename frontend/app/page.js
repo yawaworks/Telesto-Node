@@ -692,11 +692,11 @@ export default function MissionControl() {
               value={speciesQuery}
               onChange={(e) => handleSpeciesQueryChange(e.target.value)}
               placeholder="Scientific name…"
-              className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-1 text-xs text-[#d3dbe0] placeholder:text-[#5a6a72] outline-none focus:border-[#8fa3ad] w-full sm:w-64 min-w-0"
+              className="bg-[#1c2226]/95 border border-[#3a444a] rounded-lg px-3 py-1 text-xs text-[#d3dbe0] placeholder:text-[#5a6a72] outline-none focus:border-[#8fa3ad] w-full sm:w-64 min-w-0"
             />
             <button
               type="submit"
-              className="shrink-0 bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-1 text-xs uppercase tracking-widest hover:bg-[#8fa3ad]/20"
+              className="shrink-0 bg-[#1c2226]/95 border border-[#3a444a] rounded-lg px-3 py-1 text-xs uppercase tracking-widest text-[#b7c4cc] hover:bg-[#2a333a] hover:border-[#8fa3ad]/60"
             >
               Plot
             </button>

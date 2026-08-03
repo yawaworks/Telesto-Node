@@ -73,16 +73,43 @@ export function initBathymetryMap(container) {
       });
     }
 
-    // Glowing risk marker layer (invasive species / bleaching alerts)
+    // Glowing risk marker layer (invasive species / bleaching alerts).
+    //
+    // FIX: previously fixed at circle-radius 8 with circle-blur 0.6 —
+    // heavily blurred AND tiny, which made markers nearly invisible when
+    // a species search zoomed out to a wide geographic range (e.g. a
+    // species native across the whole Western Pacific), especially
+    // against the light-colored OpenFreeMap basemap. A "200 sightings
+    // found" result with genuinely no visible dots on screen was this,
+    // not a data problem — the points were there, just too small/faint
+    // to see.
+    //
+    // Now: radius scales with zoom (small when zoomed out over a huge
+    // area so points don't smear together, larger when zoomed in on a
+    // cluster), blur is reduced substantially so dots read as distinct
+    // points rather than soft smudges, and a dark stroke is added so
+    // markers stay visible regardless of what's directly underneath them
+    // on the basemap (ocean, land, or a country label).
     map.addLayer({
       id: "risk-markers",
       type: "circle",
       source: "risk-points",
       paint: {
-        "circle-radius": 8,
+        "circle-radius": [
+          "interpolate",
+          ["linear"],
+          ["zoom"],
+          2, 3,   // very zoomed out (whole-ocean view): small but visible
+          6, 6,
+          10, 9,
+          14, 12, // zoomed in on a cluster: larger, easy to click
+        ],
         "circle-color": "#ff5470",
-        "circle-blur": 0.6,
-        "circle-opacity": 0.85,
+        "circle-blur": 0.15,
+        "circle-opacity": 0.95,
+        "circle-stroke-width": 1.5,
+        "circle-stroke-color": "#1c2226",
+        "circle-stroke-opacity": 0.9,
       },
     });
   });
