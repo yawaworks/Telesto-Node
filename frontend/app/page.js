@@ -764,7 +764,7 @@ export default function MissionControl() {
       </div>
 
       {isMapMode && (
-        <div className="absolute bottom-4 left-4 flex gap-4">
+        <div className="absolute bottom-4 left-4 flex gap-3 bg-[#1c2226]/90 border border-[#3a444a] rounded-lg px-3 py-2 pointer-events-none">
           <div className="flex items-center gap-1.5">
             <span className="w-1.5 h-1.5 rounded-full bg-[#8fa3ad]" />
             <span className="text-[10px] text-[#b7c4cc]">verified sighting</span>
@@ -792,14 +792,14 @@ export default function MissionControl() {
         </div>
         <button
           onClick={handleDiscoverySnapshot}
-          className="pointer-events-auto bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20"
+          className="pointer-events-auto bg-[#1c2226]/90 border border-[#3a444a] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left text-[#b7c4cc] hover:bg-[#2a333a] hover:border-[#8fa3ad]/60"
         >
           Snapshot
         </button>
         <button
           onClick={handleExportReport}
           disabled={exportingReport}
-          className="pointer-events-auto bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          className="pointer-events-auto bg-[#1c2226]/90 border border-[#3a444a] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left text-[#b7c4cc] hover:bg-[#2a333a] hover:border-[#8fa3ad]/60 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
         >
           {exportingReport && <span className="w-1.5 h-1.5 rounded-full bg-[#8fa3ad] animate-pulse" />}
           {exportingReport ? "Generating…" : "Export field report"}
@@ -807,7 +807,7 @@ export default function MissionControl() {
         <button
           onClick={handleEmailReport}
           disabled={emailingReport}
-          className="pointer-events-auto bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left hover:bg-[#8fa3ad]/20 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+          className="pointer-events-auto bg-[#1c2226]/90 border border-[#3a444a] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left text-[#b7c4cc] hover:bg-[#2a333a] hover:border-[#8fa3ad]/60 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
         >
           {emailingReport && <span className="w-1.5 h-1.5 rounded-full bg-[#8fa3ad] animate-pulse" />}
           {emailingReport ? "Sending…" : "Email report"}

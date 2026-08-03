@@ -69,6 +69,18 @@ export function clearMarkers(map) {
  * near the edge aren't clipped by the side panels. A single result still
  * gets a sensible close-in zoom rather than fitBounds collapsing to a
  * single point at max zoom. */
+/** Zooms/pans the camera to frame the main cluster of results, with
+ * padding so pins near the edge aren't clipped by the side panels.
+ *
+ * Filters out statistical outliers before computing the bounding box —
+ * a single mis-geocoded or far-flung record (e.g. an aquarium-trade
+ * sighting on the other side of the planet from an otherwise tight
+ * cluster) previously forced the camera to zoom out to frame the ENTIRE
+ * WORLD just to include one stray point, making the actual cluster of
+ * real sightings invisible at that zoom level — exactly the opposite of
+ * what an "auto-fit" is supposed to do. Outlier points stay in the map's
+ * data source and are still visible/clickable if you manually pan out to
+ * them; they're just excluded from the camera-framing calculation. */
 function fitToFeatures(map, features) {
   const coords = features
     .map((f) => f.geometry?.coordinates)
@@ -81,9 +93,16 @@ function fitToFeatures(map, features) {
     return;
   }
 
-  let minLng = coords[0][0], maxLng = coords[0][0];
-  let minLat = coords[0][1], maxLat = coords[0][1];
-  for (const [lng, lat] of coords) {
+  const clusterCoords = filterOutliers(coords);
+
+  if (clusterCoords.length === 1) {
+    map.flyTo({ center: clusterCoords[0], zoom: 9, duration: 900 });
+    return;
+  }
+
+  let minLng = clusterCoords[0][0], maxLng = clusterCoords[0][0];
+  let minLat = clusterCoords[0][1], maxLat = clusterCoords[0][1];
+  for (const [lng, lat] of clusterCoords) {
     if (lng < minLng) minLng = lng;
     if (lng > maxLng) maxLng = lng;
     if (lat < minLat) minLat = lat;
@@ -97,6 +116,44 @@ function fitToFeatures(map, features) {
     ],
     { padding: { top: 80, bottom: 80, left: 260, right: 220 }, maxZoom: 11, duration: 900 }
   );
+}
+
+/** Drops points sitting far outside the main cluster, using distance
+ * from the median position (median rather than mean, so a handful of
+ * outliers can't drag the reference point toward themselves). Keeps
+ * everything within roughly a wider region around the cluster's
+ * "center of mass" — generous enough to keep a naturally spread-out
+ * species intact, tight enough that a genuinely distant stray record
+ * (different ocean/continent) gets excluded from the camera fit. Always
+ * keeps at least a handful of points so a legitimately dispersed dataset
+ * doesn't collapse down to nothing. */
+function filterOutliers(coords) {
+  const lngs = coords.map((c) => c[0]).sort((a, b) => a - b);
+  const lats = coords.map((c) => c[1]).sort((a, b) => a - b);
+  const medianLng = lngs[Math.floor(lngs.length / 2)];
+  const medianLat = lats[Math.floor(lats.length / 2)];
+
+  // Longitude degrees compress toward the poles — weight by cos(latitude)
+  // so distance comparisons are roughly proportional to real-world
+  // kilometers rather than raw degree deltas.
+  const latRad = (medianLat * Math.PI) / 180;
+  const lngWeight = Math.max(0.15, Math.cos(latRad));
+
+  const withDistance = coords.map((c) => {
+    const dLng = (c[0] - medianLng) * lngWeight;
+    const dLat = c[1] - medianLat;
+    return { coord: c, dist: Math.sqrt(dLng * dLng + dLat * dLat) };
+  });
+
+  withDistance.sort((a, b) => a.dist - b.dist);
+
+  // Keep the closest 90% of points, but never fewer than 3 (or all of
+  // them, if there are fewer than 3 to begin with) — a small dataset
+  // shouldn't get aggressively trimmed.
+  const keepCount = Math.max(3, Math.ceil(withDistance.length * 0.9));
+  const kept = withDistance.slice(0, Math.min(keepCount, withDistance.length));
+
+  return kept.map((d) => d.coord);
 }
 
 let popupHandlerAttached = false;
