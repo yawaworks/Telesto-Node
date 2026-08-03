@@ -18,9 +18,6 @@ const DEFAULT_SPECIES = "Acropora cervicornis";
 const DEFAULT_VIDEO_SRC =
   process.env.NEXT_PUBLIC_DEFAULT_VIDEO_URL ||
   "https://res.cloudinary.com/YOUR_CLOUD_NAME/video/upload/rov-feed.mp4";
-const N8N_MISSION_REPORT_WEBHOOK_URL =
-  process.env.NEXT_PUBLIC_N8N_MISSION_REPORT_WEBHOOK_URL ||
-  "https://yawaworks.app.n8n.cloud/webhook/email-mission-report";
 
 export default function MissionControl() {
   const { data: session, status: sessionStatus } = useSession();
@@ -109,6 +106,7 @@ export default function MissionControl() {
   const { boxes, ghostBoxes, coralBleachingRatio, status } = useFrameDetection(videoRef, {
     enabled: viewMode === "video" && !videoLoadError,
     telemetry,
+    alertEmail: session?.user?.email,
   });
   const alert =
     coralBleachingRatio !== null && coralBleachingRatio >= BLEACHING_ALERT_THRESHOLD;
@@ -383,16 +381,8 @@ export default function MissionControl() {
       const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
 
       const t = telemetryRef.current;
-      // Prefer whatever's actually detected on screen right now over the
-      // unrelated map search box — falls back to speciesQuery only if
-      // nothing is currently in frame. Read via ref so this always sees
-      // the latest detection, whether triggered by the on-screen button
-      // or the gamepad A-button path.
       const detectedLabel = boxesRef.current?.[0]?.label;
 
-      // Hand off to the annotation editor (screenshot-tool style) rather
-      // than uploading immediately — the researcher decides from there
-      // whether to annotate, save, download, or share.
       setAnnotatorMode("new");
       setAnnotatorImageSrc(dataUrl);
       setAnnotatorTelemetry({
@@ -446,6 +436,11 @@ export default function MissionControl() {
     }
   }
 
+  // Calls the backend directly to generate + email the mission report PDF
+  // via Resend. Previously went through an n8n webhook (Webhook -> Fetch
+  // Report PDF -> PDF to Base64 -> Send Report Email); now the backend
+  // does all of that itself in one endpoint, so this no longer depends on
+  // any n8n instance (cloud quota or local Docker uptime) being available.
   async function handleEmailReport() {
     const recipientEmail = session?.user?.email;
     if (!recipientEmail) return;
@@ -453,7 +448,7 @@ export default function MissionControl() {
     setEmailingReport(true);
     setEmailReportMessage(null);
     try {
-      const response = await fetch(N8N_MISSION_REPORT_WEBHOOK_URL, {
+      const response = await fetch(`${API_BASE_URL}/send-mission-report-email`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...telemetry, recipient_email: recipientEmail }),

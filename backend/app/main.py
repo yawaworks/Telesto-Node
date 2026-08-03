@@ -3,7 +3,6 @@ import re
 from typing import List, Optional
 
 from dotenv import load_dotenv
-from .species_info import get_species_info
 
 # Must run BEFORE importing app.inference or app.alerts, since both read
 # env vars (ROBOFLOW_API_KEY, N8N_DETECTION_WEBHOOK_URL) from the
@@ -30,11 +29,12 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from app.alerts import send_detection_alert
-from app.cloudinary_client import delete_clip, delete_snapshot, upload_clip, upload_snapshot
+from app.cloudinary_client import delete_clip, upload_clip, upload_snapshot
 from app.db import get_db, is_connected
 from app.inference import clahe_correct, coral_bleaching_ratio, predict_with_roboflow
 from app.obis_client import fetch_obis_species_data
 from app.report import generate_mission_report, log_detections
+from app.report_email import send_mission_report_email
 from app.telemetry import TelemetrySimulator, MISSION_LAT, MISSION_LNG
 from datetime import datetime, timezone
 from urllib.parse import urlparse
@@ -131,6 +131,7 @@ async def analyze_frame(
     conf_threshold: float = 0.2,
     latitude: float = MISSION_LAT,
     longitude: float = MISSION_LNG,
+    alert_email: str | None = None,
 ):
     """Runs every enabled Roboflow model against this frame (marine-fishes
     species detection + the coral bleach classifier by default), merging
@@ -142,6 +143,10 @@ async def analyze_frame(
     They default to the mission's home coordinates (Great Barrier Reef)
     if the frontend hasn't sent them yet — same fallback used everywhere
     else telemetry is referenced in this app.
+
+    alert_email is the currently logged-in researcher's session email,
+    sent by the frontend so detection alerts go to whoever is actually
+    running THIS mission, not one hardcoded inbox.
     """
     raw_bytes = await file.read()
     np_arr = np.frombuffer(raw_bytes, np.uint8)
@@ -177,10 +182,11 @@ async def analyze_frame(
 
     log_detections(result["boxes"], frame_ratio)
 
-    # Fire detection alerts to n8n without blocking the response the
-    # frontend is waiting on. send_detection_alert internally filters by
-    # confidence threshold and applies a per-species cooldown, so this is
-    # safe to call for every box on every frame.
+    # Fire detection alerts directly via Resend (no n8n in the path)
+    # without blocking the response the frontend is waiting on.
+    # send_detection_alert internally filters by confidence threshold and
+    # applies a per-(species, recipient) cooldown, so this is safe to call
+    # for every box on every frame.
     for box in boxes:
         asyncio.create_task(
             send_detection_alert(
@@ -188,6 +194,7 @@ async def analyze_frame(
                 confidence=box.confidence,
                 latitude=latitude,
                 longitude=longitude,
+                to_email=alert_email,
             )
         )
 
@@ -200,17 +207,6 @@ class SnapshotResponse(BaseModel):
     url: str
     public_id: str
     saved_to_db: bool
-
-
-class SnapshotListItem(BaseModel):
-    id: str
-    url: str
-    captured_at: str
-    telemetry: dict
-    species_query: str
-    owner_email: str
-    annotated: bool = False
-    shared: bool = False
 
 
 class ClipResponse(BaseModel):
@@ -351,16 +347,13 @@ async def create_snapshot(
     salinity: str = "",
     heading: str = "",
     species_query: str = "",
-    owner_email: str = "",
-    annotated: bool = False,
-    shared: bool = False,
 ):
-    """Uploads a Discovery Snapshot (triggered by the gamepad's 'A' button,
-    or saved from the annotation editor) to Cloudinary, then logs a record
-    of it — image URL plus whatever mission telemetry/species context was
-    active at capture time — to Mongo if it's connected. Falls back to
-    upload-only (no DB record) if Mongo is currently down, same graceful-
-    degradation pattern used elsewhere in this API."""
+    """Uploads a Discovery Snapshot (triggered by the gamepad's 'A' button)
+    to Cloudinary, then logs a record of it — image URL plus whatever
+    mission telemetry/species context was active at capture time — to
+    Mongo if it's connected. Falls back to upload-only (no DB record) if
+    Mongo is currently down, same graceful-degradation pattern used
+    elsewhere in this API."""
     raw_bytes = await file.read()
 
     try:
@@ -385,9 +378,6 @@ async def create_snapshot(
                         "heading": heading,
                     },
                     "species_query": species_query,
-                    "owner_email": owner_email,
-                    "annotated": annotated,
-                    "shared": shared,
                 }
             )
             saved_to_db = True
@@ -401,87 +391,6 @@ async def create_snapshot(
         public_id=upload_result["public_id"],
         saved_to_db=saved_to_db,
     )
-
-
-@app.get("/snapshots/count")
-@limiter.limit("60/minute")
-async def count_snapshots(request: Request, owner_email: str):
-    """Returns how many Discovery Snapshots a researcher has taken — used
-    for the activity stats on their profile page. Snapshots created before
-    owner_email was tracked won't be attributed to anyone; that's expected
-    for historical data."""
-    if not owner_email:
-        raise HTTPException(status_code=400, detail="owner_email is required")
-
-    db = get_db()
-    if db is None:
-        return {"count": 0}
-
-    count = db["snapshots"].count_documents({"owner_email": owner_email})
-    return {"count": count}
-
-
-@app.get("/snapshots", response_model=List[SnapshotListItem])
-@limiter.limit("60/minute")
-async def list_snapshots(request: Request, scope: str = "mine", owner_email: str = ""):
-    """scope="mine" returns only this researcher's own snapshots (requires
-    owner_email). scope="shared" returns every snapshot anyone has marked
-    shared, regardless of who's asking — same pattern as /clips."""
-    db = get_db()
-    if db is None:
-        return []
-
-    if scope == "shared":
-        query = {"shared": True}
-    else:
-        if not owner_email:
-            raise HTTPException(status_code=400, detail="owner_email is required for scope=mine")
-        query = {"owner_email": owner_email}
-
-    docs = db["snapshots"].find(query).sort("captured_at", -1).limit(200)
-    return [
-        SnapshotListItem(
-            id=str(doc["_id"]),
-            url=doc["url"],
-            captured_at=doc["captured_at"].isoformat() if doc.get("captured_at") else "",
-            telemetry=doc.get("telemetry", {}),
-            species_query=doc.get("species_query", ""),
-            owner_email=doc.get("owner_email", ""),
-            annotated=doc.get("annotated", False),
-            shared=doc.get("shared", False),
-        )
-        for doc in docs
-    ]
-
-
-@app.delete("/snapshots/{snapshot_id}")
-@limiter.limit("20/minute")
-async def remove_snapshot(request: Request, snapshot_id: str, owner_email: str):
-    """Deletes a Discovery Snapshot from both Mongo and Cloudinary.
-    Ownership-checked, same pattern as clip deletion."""
-    db = get_db()
-    if db is None:
-        raise HTTPException(status_code=503, detail="Snapshot library is unavailable right now")
-
-    try:
-        oid = ObjectId(snapshot_id)
-    except InvalidId:
-        raise HTTPException(status_code=400, detail="Invalid snapshot id")
-
-    doc = db["snapshots"].find_one({"_id": oid})
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Snapshot not found")
-
-    if doc.get("owner_email") != owner_email:
-        raise HTTPException(status_code=403, detail="Only the snapshot's owner can delete it")
-
-    try:
-        delete_snapshot(doc["public_id"])
-    except Exception as exc:
-        print(f"[snapshots] Cloudinary delete failed for {doc['public_id']}: {exc}")
-
-    db["snapshots"].delete_one({"_id": oid})
-    return {"deleted": True}
 
 
 @app.get("/export-report")
@@ -511,6 +420,43 @@ async def export_report(
             "Content-Disposition": 'attachment; filename="telesto-node-mission-report.pdf"'
         },
     )
+
+
+class EmailReportRequest(BaseModel):
+    depth: str = "42.6 m"
+    coords: str = "11.3500 N, 144.2400 E"
+    temp: str = "17.2°C"
+    salinity: str = "34.9 PSU"
+    heading: str = "086°"
+    recipient_email: str
+
+
+@app.post("/send-mission-report-email")
+@limiter.limit("10/minute")
+async def send_mission_report_email_endpoint(request: Request, payload: EmailReportRequest):
+    """Generates the same PDF as /export-report and emails it to the
+    given recipient via Resend, directly — no n8n workflow involved.
+    Replaces the old "Mission Report Email" n8n workflow (Webhook ->
+    Fetch Report PDF -> PDF to Base64 -> Send Report Email) with three
+    lines of Python, since the backend already has everything it needs
+    (the PDF generator, and now the Resend call) without an external
+    hosting dependency in between.
+    """
+    telemetry = {
+        "depth": payload.depth,
+        "coords": payload.coords,
+        "temp": payload.temp,
+        "salinity": payload.salinity,
+        "heading": payload.heading,
+    }
+    pdf_bytes = generate_mission_report(telemetry)
+
+    try:
+        await send_mission_report_email(pdf_bytes, payload.recipient_email)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Failed to send report email: {exc}")
+
+    return {"status": "report_sent"}
 
 
 ALLOWED_VIDEO_HOSTS_NOTE = (
@@ -734,12 +680,3 @@ async def telemetry_socket(websocket: WebSocket):
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         pass
-
-@app.get("/species-info")
-async def species_info(name: str):
-    if not name:
-        raise HTTPException(status_code=400, detail="name is required")
-    try:
-        return await get_species_info(name)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Species info lookup failed: {e}")

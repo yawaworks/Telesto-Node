@@ -1,0 +1,22 @@
+name: Species Data Sync
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"  # every 6 hours, same interval as the old n8n workflow
+  workflow_dispatch: {}     # lets you trigger it manually from the Actions tab too
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Run species sync
+        env:
+          BACKEND_URL: ${{ secrets.BACKEND_URL }}
+          INTERNAL_SYNC_SECRET: ${{ secrets.INTERNAL_SYNC_SECRET }}
+        run: python scripts/sync_species.py

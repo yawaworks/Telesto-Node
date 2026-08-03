@@ -33,6 +33,9 @@ function distance(a, b) {
  *   only the latest value at capture time is sent along with the frame,
  *   as query params, so the backend can attach real coordinates to any
  *   n8n detection alert it fires.
+ * @param {string} [options.alertEmail] - the logged-in researcher's
+ *   session email, sent with every frame so detection alerts go to
+ *   whoever is actually running this mission, not one fixed inbox.
  *
  * Returns both `boxes` (species actually visible in the current frame)
  * and `ghostBoxes` (species seen within the last GHOST_EXPIRY_MS but not
@@ -40,7 +43,7 @@ function distance(a, b) {
  * they were last seen at, so a hover can seek the video back to that
  * moment). DetectionOverlay is responsible for rendering/hovering both.
  */
-export function useFrameDetection(videoRef, { enabled = true, telemetry } = {}) {
+export function useFrameDetection(videoRef, { enabled = true, telemetry, alertEmail } = {}) {
   const [boxes, setBoxes] = useState([]);
   const [ghostBoxes, setGhostBoxes] = useState([]);
   const [classifications, setClassifications] = useState([]);
@@ -63,6 +66,14 @@ export function useFrameDetection(videoRef, { enabled = true, telemetry } = {}) 
   useEffect(() => {
     telemetryRef.current = telemetry;
   }, [telemetry]);
+
+  // Same ref pattern as telemetry — session email rarely changes mid-use,
+  // but reading it via ref keeps this consistent and avoids adding it as
+  // a dependency that could restart the capture interval unnecessarily.
+  const alertEmailRef = useRef(alertEmail);
+  useEffect(() => {
+    alertEmailRef.current = alertEmail;
+  }, [alertEmail]);
 
   useEffect(() => {
     if (!enabled) {
@@ -167,6 +178,12 @@ export function useFrameDetection(videoRef, { enabled = true, telemetry } = {}) 
         if (currentTelemetry?.lat != null && currentTelemetry?.lng != null) {
           params.set("latitude", String(currentTelemetry.lat));
           params.set("longitude", String(currentTelemetry.lng));
+        }
+        // Detection alerts go to whoever's actually logged in and running
+        // this mission — not a single fixed inbox — so this rides along
+        // with every frame the same way lat/lng does.
+        if (alertEmailRef.current) {
+          params.set("alert_email", alertEmailRef.current);
         }
 
         const response = await fetch(
