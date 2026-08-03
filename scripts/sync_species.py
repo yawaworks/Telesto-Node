@@ -84,7 +84,12 @@ def main():
         f"{BACKEND_URL}/internal/species-sync",
         headers={"x-sync-secret": SYNC_SECRET},
         json={"records": records},
-        timeout=30,
+        # 60s, not 30 — Render's free tier can take 30-50s to wake from a
+        # cold start (sleeps after ~15 min idle) before it even accepts a
+        # connection, on top of Mongo write time. The Keep-Alive workflow
+        # is meant to prevent this, but this timeout is a safety margin
+        # for the (rare) case it misses a ping window.
+        timeout=60,
     )
     resp.raise_for_status()
     print(f"[species-sync] Synced {len(records)} records: {resp.json()}")
