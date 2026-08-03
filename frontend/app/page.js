@@ -62,6 +62,17 @@ export default function MissionControl() {
   }, [telemetry]);
 
   const [speciesQuery, setSpeciesQuery] = useState(DEFAULT_SPECIES);
+  // Feedback for the live species search — "idle" | "loading" | "success"
+  // | "empty" | "error". Previously a search gave zero visible feedback:
+  // it could succeed, fail, or find nothing, and the map would just sit
+  // there unchanged either way.
+  const [speciesSearchStatus, setSpeciesSearchStatus] = useState("idle");
+  const [speciesResultCount, setSpeciesResultCount] = useState(0);
+  const speciesSearchDebounceRef = useRef(null);
+  // Guards against an older, slower request's response landing AFTER a
+  // newer search has already started — without this, typing quickly
+  // could show stale results if an earlier request resolves last.
+  const speciesSearchSeqRef = useRef(0);
   const [viewMode, setViewMode] = useState("video");
   // Telemetry and action panels default closed so phones start with an
   // unobstructed feed; sm:flex below forces them open on tablet/desktop
@@ -173,6 +184,9 @@ export default function MissionControl() {
   useEffect(() => {
     return () => {
       webcamStreamRef.current?.getTracks().forEach((track) => track.stop());
+      if (speciesSearchDebounceRef.current) {
+        clearTimeout(speciesSearchDebounceRef.current);
+      }
     };
   }, []);
 
@@ -406,11 +420,50 @@ export default function MissionControl() {
     handleDiscoverySnapshotRef.current = handleDiscoverySnapshot;
   });
 
+  // Shared by both the debounced live-typing search and the explicit
+  // "Plot" button submit, so both paths give identical feedback (result
+  // count, empty state, error) rather than the button silently working
+  // differently than typing does.
+  async function runSpeciesSearch(query) {
+    if (!mapRef.current || !query?.trim()) return;
+
+    const seq = ++speciesSearchSeqRef.current;
+    setSpeciesSearchStatus("loading");
+
+    const result = await loadSpeciesMarkers(mapRef.current, query.trim());
+
+    // A newer search started while this one was in flight — drop this
+    // result rather than let it overwrite the newer search's feedback.
+    if (seq !== speciesSearchSeqRef.current) return;
+
+    setSpeciesSearchStatus(result.status);
+    setSpeciesResultCount(result.count || 0);
+  }
+
+  function handleSpeciesQueryChange(value) {
+    setSpeciesQuery(value);
+
+    if (speciesSearchDebounceRef.current) {
+      clearTimeout(speciesSearchDebounceRef.current);
+    }
+    if (!value.trim()) {
+      setSpeciesSearchStatus("idle");
+      return;
+    }
+    // Genshin-tracker-style live search: wait for a short pause in typing
+    // rather than searching on every keystroke, so a name like
+    // "Acropora cervicornis" doesn't fire a dozen requests while typed.
+    speciesSearchDebounceRef.current = setTimeout(() => {
+      runSpeciesSearch(value);
+    }, 450);
+  }
+
   function handleSpeciesSearch(e) {
     e.preventDefault();
-    if (mapRef.current) {
-      loadSpeciesMarkers(mapRef.current, speciesQuery);
+    if (speciesSearchDebounceRef.current) {
+      clearTimeout(speciesSearchDebounceRef.current);
     }
+    runSpeciesSearch(speciesQuery);
   }
 
   async function handleExportReport() {
@@ -617,24 +670,51 @@ export default function MissionControl() {
       </div>
 
       {isMapMode && (
-        <form
-          onSubmit={handleSpeciesSearch}
-          className="absolute top-[68px] left-1/2 -translate-x-1/2 pointer-events-auto flex gap-2 px-2 w-full max-w-xs sm:w-auto sm:max-w-none justify-center"
-        >
-          <input
-            type="text"
-            value={speciesQuery}
-            onChange={(e) => setSpeciesQuery(e.target.value)}
-            placeholder="Scientific name…"
-            className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-1 text-xs text-[#d3dbe0] placeholder:text-[#5a6a72] outline-none focus:border-[#8fa3ad] w-full sm:w-64 min-w-0"
-          />
-          <button
-            type="submit"
-            className="shrink-0 bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-1 text-xs uppercase tracking-widest hover:bg-[#8fa3ad]/20"
+        <div className="absolute top-[68px] left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 px-2 w-full max-w-xs sm:w-auto sm:max-w-none">
+          <form
+            onSubmit={handleSpeciesSearch}
+            className="pointer-events-auto flex gap-2 w-full sm:w-auto justify-center"
           >
-            Plot
-          </button>
-        </form>
+            <input
+              type="text"
+              value={speciesQuery}
+              onChange={(e) => handleSpeciesQueryChange(e.target.value)}
+              placeholder="Scientific name…"
+              className="bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-1 text-xs text-[#d3dbe0] placeholder:text-[#5a6a72] outline-none focus:border-[#8fa3ad] w-full sm:w-64 min-w-0"
+            />
+            <button
+              type="submit"
+              className="shrink-0 bg-[#8fa3ad]/10 border border-[#5a6a72] rounded-lg px-3 py-1 text-xs uppercase tracking-widest hover:bg-[#8fa3ad]/20"
+            >
+              Plot
+            </button>
+          </form>
+
+          {/* Live search feedback — result count, empty state, or error.
+              Previously a search gave no visible confirmation at all,
+              even a fully successful one. */}
+          {speciesSearchStatus !== "idle" && (
+            <div className="pointer-events-none bg-[#1c2226]/90 border border-[#3a444a] rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest">
+              {speciesSearchStatus === "loading" && (
+                <span className="text-[#a48a55] flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-[#a48a55] animate-pulse" />
+                  Searching…
+                </span>
+              )}
+              {speciesSearchStatus === "success" && (
+                <span className="text-[#8fa3ad]">
+                  {speciesResultCount} sighting{speciesResultCount === 1 ? "" : "s"} found
+                </span>
+              )}
+              {speciesSearchStatus === "empty" && (
+                <span className="text-[#5a6a72]">No sightings found for this species</span>
+              )}
+              {speciesSearchStatus === "error" && (
+                <span className="text-[#c47a6e]">Search failed — check connection and try again</span>
+              )}
+            </div>
+          )}
+        </div>
       )}
 
       <div
