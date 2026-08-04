@@ -104,6 +104,7 @@ export async function GET() {
   return NextResponse.json({
     email: user.email,
     hasPassword: Boolean(user.hashedPassword),
+    twoFactorEnabled: Boolean(user.twoFactorEnabled),
     name: profile.name || user.name || "",
     institution: profile.institution || "",
     role: profile.role || "",

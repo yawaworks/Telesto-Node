@@ -115,6 +115,29 @@ function ProfileContent() {
   const [emailSaving, setEmailSaving] = useState(false);
   const [emailMessage, setEmailMessage] = useState(null);
 
+  // Two-factor authentication
+  const [twoFactorEnabled, setTwoFactorEnabled] = useState(false);
+  const [twoFAStep, setTwoFAStep] = useState("idle"); // idle | settingUp | showingBackupCodes | disabling
+  const [qrCodeDataUrl, setQrCodeDataUrl] = useState(null);
+  const [manualSecret, setManualSecret] = useState("");
+  const [verifyCode, setVerifyCode] = useState("");
+  const [backupCodes, setBackupCodes] = useState([]);
+  const [twoFASaving, setTwoFASaving] = useState(false);
+  const [twoFAMessage, setTwoFAMessage] = useState(null);
+  const [disablePassword, setDisablePassword] = useState("");
+  const [disableTotp, setDisableTotp] = useState("");
+
+  // Download my data
+  const [downloadingData, setDownloadingData] = useState(false);
+
+  // Delete account
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteTotp, setDeleteTotp] = useState("");
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [deleteMessage, setDeleteMessage] = useState(null);
+
   const [profile, setProfile] = useState({
     email: "",
     name: "",
@@ -140,6 +163,7 @@ function ProfileContent() {
         const data = await res.json();
         setProfile((prev) => ({ ...prev, ...data }));
         setHasPassword(Boolean(data.hasPassword));
+        setTwoFactorEnabled(Boolean(data.twoFactorEnabled));
         return data;
       }
     } catch (err) {
@@ -287,6 +311,126 @@ function ProfileContent() {
     }
   }
 
+  async function handleStartTwoFactorSetup() {
+    setTwoFASaving(true);
+    setTwoFAMessage(null);
+    try {
+      const res = await fetch("/api/account/2fa/setup", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Couldn't start 2FA setup");
+      setQrCodeDataUrl(data.qrCodeDataUrl);
+      setManualSecret(data.secret);
+      setTwoFAStep("settingUp");
+    } catch (err) {
+      setTwoFAMessage({ type: "error", text: err.message || "Couldn't start 2FA setup" });
+    } finally {
+      setTwoFASaving(false);
+    }
+  }
+
+  async function handleVerifyTwoFactor() {
+    setTwoFASaving(true);
+    setTwoFAMessage(null);
+    try {
+      const res = await fetch("/api/account/2fa/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: verifyCode }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Couldn't verify code");
+      setBackupCodes(data.backupCodes);
+      setTwoFactorEnabled(true);
+      setTwoFAStep("showingBackupCodes");
+      setVerifyCode("");
+    } catch (err) {
+      setTwoFAMessage({ type: "error", text: err.message || "Couldn't verify code" });
+    } finally {
+      setTwoFASaving(false);
+    }
+  }
+
+  function handleFinishTwoFactorSetup() {
+    // Backup codes are only ever shown once (this exact moment) — closing
+    // this out discards them from memory. The user was told to save them.
+    setTwoFAStep("idle");
+    setBackupCodes([]);
+    setQrCodeDataUrl(null);
+    setManualSecret("");
+    setTwoFAMessage({ type: "success", text: "Two-factor authentication is now enabled" });
+  }
+
+  async function handleDisableTwoFactor() {
+    setTwoFASaving(true);
+    setTwoFAMessage(null);
+    try {
+      const res = await fetch("/api/account/2fa/disable", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(hasPassword ? { currentPassword: disablePassword } : {}),
+          totpCode: disableTotp || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Couldn't disable 2FA");
+      setTwoFactorEnabled(false);
+      setTwoFAStep("idle");
+      setDisablePassword("");
+      setDisableTotp("");
+      setTwoFAMessage({ type: "success", text: "Two-factor authentication disabled" });
+    } catch (err) {
+      setTwoFAMessage({ type: "error", text: err.message || "Couldn't disable 2FA" });
+    } finally {
+      setTwoFASaving(false);
+    }
+  }
+
+  async function handleDownloadData() {
+    setDownloadingData(true);
+    try {
+      const res = await fetch("/api/account/export");
+      if (!res.ok) throw new Error("Export failed");
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `telesto-node-data-export-${Date.now()}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error("Data export failed:", err);
+    } finally {
+      setDownloadingData(false);
+    }
+  }
+
+  async function handleDeleteAccount() {
+    setDeleting(true);
+    setDeleteMessage(null);
+    try {
+      const res = await fetch("/api/account/delete", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...(hasPassword ? { currentPassword: deletePassword } : {}),
+          ...(twoFactorEnabled ? { totpCode: deleteTotp } : {}),
+          confirmationText: deleteConfirmText,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Couldn't delete account");
+
+      // Account is gone server-side — sign out locally and leave.
+      await signOut({ callbackUrl: "/login" });
+    } catch (err) {
+      setDeleteMessage({ type: "error", text: err.message || "Couldn't delete account" });
+      setDeleting(false);
+    }
+  }
+
   if (sessionStatus === "unauthenticated") return null;
 
   return (
@@ -345,7 +489,7 @@ function ProfileContent() {
               </div>
             </div>
 
-            <div className="flex flex-col gap-8">
+            <div className="flex flex-col gap-8 pb-8">
               {/* Identity & affiliation */}
               <section className="bg-[#1c2226] border border-[#3a444a] rounded-xl p-4 sm:p-5 flex flex-col gap-4">
                 <h2 className="text-xs uppercase tracking-widest text-[#5a6a72]">
@@ -544,6 +688,178 @@ function ProfileContent() {
                   )}
                 </div>
 
+                {/* Two-factor authentication */}
+                <div className="pt-3 border-t border-[#3a444a]">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad] mb-1">
+                        Two-factor authentication
+                      </p>
+                      <p className="text-[11px] text-[#5a6a72]">
+                        {twoFactorEnabled
+                          ? "Enabled — an authenticator code is required at sign-in"
+                          : "Not enabled"}
+                      </p>
+                    </div>
+                    {twoFAStep === "idle" && !twoFactorEnabled && (
+                      <button
+                        type="button"
+                        onClick={handleStartTwoFactorSetup}
+                        disabled={twoFASaving}
+                        className="text-xs uppercase tracking-widest text-[#8fa3ad] hover:text-[#d3dbe0] disabled:opacity-50"
+                      >
+                        {twoFASaving ? "Starting..." : "Enable"}
+                      </button>
+                    )}
+                    {twoFAStep === "idle" && twoFactorEnabled && (
+                      <button
+                        type="button"
+                        onClick={() => setTwoFAStep("disabling")}
+                        className="text-xs uppercase tracking-widest text-[#c47a6e] hover:text-[#d99a8f]"
+                      >
+                        Disable
+                      </button>
+                    )}
+                  </div>
+
+                  {twoFAStep === "settingUp" && (
+                    <div className="mt-3 flex flex-col gap-3 bg-black/20 border border-[#3a444a] rounded-lg p-3">
+                      <p className="text-[11px] text-[#5a6a72]">
+                        Scan this with an authenticator app (Google Authenticator, Authy, 1Password, etc.), then enter the 6-digit code it generates.
+                      </p>
+                      {qrCodeDataUrl && (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img
+                          src={qrCodeDataUrl}
+                          alt="Two-factor authentication QR code"
+                          className="w-40 h-40 self-center bg-white p-2 rounded-lg"
+                        />
+                      )}
+                      <Field label="Can't scan? Enter this code manually">
+                        <p className="text-xs font-bold text-[#d3dbe0] break-all bg-black/30 rounded px-2 py-1.5">
+                          {manualSecret}
+                        </p>
+                      </Field>
+                      <Field label="6-digit code">
+                        <input
+                          type="text"
+                          value={verifyCode}
+                          onChange={(e) => setVerifyCode(e.target.value)}
+                          placeholder="123456"
+                          className={`${inputClass} tracking-widest text-center`}
+                        />
+                      </Field>
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={handleVerifyTwoFactor}
+                          disabled={twoFASaving || !verifyCode}
+                          className="bg-[#8fa3ad]/10 border border-[#8fa3ad]/60 rounded-lg px-4 py-1.5 text-xs uppercase tracking-widest hover:bg-[#8fa3ad]/20 disabled:opacity-50"
+                        >
+                          {twoFASaving ? "Verifying..." : "Verify & enable"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTwoFAStep("idle");
+                            setQrCodeDataUrl(null);
+                            setManualSecret("");
+                            setVerifyCode("");
+                          }}
+                          className="text-xs uppercase tracking-widest text-[#5a6a72] hover:text-[#b7c4cc]"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                      {twoFAMessage?.type === "error" && (
+                        <p className="text-xs text-[#c47a6e]">{twoFAMessage.text}</p>
+                      )}
+                    </div>
+                  )}
+
+                  {twoFAStep === "showingBackupCodes" && (
+                    <div className="mt-3 flex flex-col gap-3 bg-black/20 border border-[#a48a55] rounded-lg p-3">
+                      <p className="text-[11px] text-[#d8b877]">
+                        Save these backup codes somewhere safe -- each works once, and this is the only time they'll be shown. Use one if you lose access to your authenticator app.
+                      </p>
+                      <div className="grid grid-cols-2 gap-1.5 bg-black/30 rounded-lg p-3">
+                        {backupCodes.map((code) => (
+                          <span key={code} className="text-xs font-bold text-[#d3dbe0] text-center">
+                            {code}
+                          </span>
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleFinishTwoFactorSetup}
+                        className="bg-[#8fa3ad]/10 border border-[#8fa3ad]/60 rounded-lg px-4 py-1.5 text-xs uppercase tracking-widest hover:bg-[#8fa3ad]/20"
+                      >
+                        I've saved these -- done
+                      </button>
+                    </div>
+                  )}
+
+                  {twoFAStep === "disabling" && (
+                    <div className="mt-3 flex flex-col gap-3 bg-black/20 border border-[#3a444a] rounded-lg p-3">
+                      <p className="text-[11px] text-[#5a6a72]">
+                        Confirm with your password{hasPassword ? " and/or" : " or"} a current 2FA code.
+                      </p>
+                      {hasPassword && (
+                        <Field label="Current password">
+                          <input
+                            type="password"
+                            value={disablePassword}
+                            onChange={(e) => setDisablePassword(e.target.value)}
+                            className={inputClass}
+                          />
+                        </Field>
+                      )}
+                      <Field label="2FA code (or backup code)">
+                        <input
+                          type="text"
+                          value={disableTotp}
+                          onChange={(e) => setDisableTotp(e.target.value)}
+                          className={inputClass}
+                        />
+                      </Field>
+                      <div className="flex items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={handleDisableTwoFactor}
+                          disabled={twoFASaving || (!disablePassword && !disableTotp)}
+                          className="bg-[#c47a6e]/10 border border-[#c47a6e]/60 rounded-lg px-4 py-1.5 text-xs uppercase tracking-widest text-[#d99a8f] hover:bg-[#c47a6e]/20 disabled:opacity-50"
+                        >
+                          {twoFASaving ? "Disabling..." : "Disable 2FA"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setTwoFAStep("idle");
+                            setDisablePassword("");
+                            setDisableTotp("");
+                          }}
+                          className="text-xs uppercase tracking-widest text-[#5a6a72] hover:text-[#b7c4cc]"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                      {twoFAMessage?.type === "error" && (
+                        <p className="text-xs text-[#c47a6e]">{twoFAMessage.text}</p>
+                      )}
+                    </div>
+                  )}
+
+                  {twoFAStep === "idle" && twoFAMessage && (
+                    <p
+                      className={`text-xs mt-2 ${
+                        twoFAMessage.type === "success" ? "text-[#8fa3ad]" : "text-[#c47a6e]"
+                      }`}
+                    >
+                      {twoFAMessage.text}
+                    </p>
+                  )}
+                </div>
+
                 <div className="pt-3 border-t border-[#3a444a] flex items-center justify-between">
                   <p className="text-[11px] text-[#5a6a72]">Signed in to Telesto Node mission control</p>
                   <button
@@ -624,7 +940,7 @@ function ProfileContent() {
               </section>
 
               {/* Save bar */}
-              <div className="flex items-center gap-3 pb-8">
+              <div className="flex items-center gap-3">
                 <button
                   onClick={handleSave}
                   disabled={saving}
@@ -642,6 +958,112 @@ function ProfileContent() {
                   </span>
                 )}
               </div>
+
+              {/* Data & privacy */}
+              <section className="bg-[#1c2226] border border-[#3a444a] rounded-xl p-4 sm:p-5 flex items-center justify-between gap-4">
+                <div>
+                  <h2 className="text-xs uppercase tracking-widest text-[#5a6a72] mb-1">
+                    Data &amp; privacy
+                  </h2>
+                  <p className="text-[11px] text-[#5a6a72]">
+                    Download a copy of your profile, clips, and snapshots as a JSON file.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleDownloadData}
+                  disabled={downloadingData}
+                  className="shrink-0 bg-[#8fa3ad]/10 border border-[#8fa3ad]/60 rounded-lg px-4 py-2 text-xs uppercase tracking-widest text-[#d3dbe0] hover:bg-[#8fa3ad]/20 transition disabled:opacity-50"
+                >
+                  {downloadingData ? "Preparing…" : "Download my data"}
+                </button>
+              </section>
+
+              {/* Danger zone */}
+              <section className="bg-[#c47a6e]/5 border border-[#c47a6e]/40 rounded-xl p-4 sm:p-5 flex flex-col gap-4">
+                <h2 className="text-xs uppercase tracking-widest text-[#c47a6e]">Danger zone</h2>
+
+                {!deleteOpen ? (
+                  <div className="flex items-center justify-between gap-4">
+                    <p className="text-[11px] text-[#5a6a72]">
+                      Permanently delete your account, profile, clips, and snapshots. This can't be undone.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setDeleteOpen(true)}
+                      className="shrink-0 bg-[#c47a6e]/10 border border-[#c47a6e]/60 rounded-lg px-4 py-2 text-xs uppercase tracking-widest text-[#d99a8f] hover:bg-[#c47a6e]/20 transition"
+                    >
+                      Delete account
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-3">
+                    <p className="text-[11px] text-[#d99a8f]">
+                      This permanently deletes your account, profile, clips, and snapshots. There is no way to undo this.
+                    </p>
+                    {hasPassword && (
+                      <Field label="Current password">
+                        <input
+                          type="password"
+                          value={deletePassword}
+                          onChange={(e) => setDeletePassword(e.target.value)}
+                          className={inputClass}
+                        />
+                      </Field>
+                    )}
+                    {twoFactorEnabled && (
+                      <Field label="2FA code (or backup code)">
+                        <input
+                          type="text"
+                          value={deleteTotp}
+                          onChange={(e) => setDeleteTotp(e.target.value)}
+                          className={inputClass}
+                        />
+                      </Field>
+                    )}
+                    <Field label={'Type "DELETE" to confirm'}>
+                      <input
+                        type="text"
+                        value={deleteConfirmText}
+                        onChange={(e) => setDeleteConfirmText(e.target.value)}
+                        placeholder="DELETE"
+                        className={inputClass}
+                      />
+                    </Field>
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={handleDeleteAccount}
+                        disabled={
+                          deleting ||
+                          deleteConfirmText !== "DELETE" ||
+                          (hasPassword && !deletePassword) ||
+                          (twoFactorEnabled && !deleteTotp)
+                        }
+                        className="bg-[#c47a6e] border border-[#c47a6e] rounded-lg px-4 py-1.5 text-xs uppercase tracking-widest text-[#171d20] font-bold hover:bg-[#d99a8f] disabled:opacity-40"
+                      >
+                        {deleting ? "Deleting…" : "Permanently delete my account"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDeleteOpen(false);
+                          setDeletePassword("");
+                          setDeleteTotp("");
+                          setDeleteConfirmText("");
+                          setDeleteMessage(null);
+                        }}
+                        className="text-xs uppercase tracking-widest text-[#5a6a72] hover:text-[#b7c4cc]"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    {deleteMessage?.type === "error" && (
+                      <p className="text-xs text-[#c47a6e]">{deleteMessage.text}</p>
+                    )}
+                  </div>
+                )}
+              </section>
             </div>
           </>
         )}

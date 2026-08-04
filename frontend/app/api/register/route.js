@@ -2,6 +2,7 @@ import bcrypt from "bcryptjs";
 import { NextResponse } from "next/server";
 import clientPromise from "../../../lib/mongodb";
 import { registerLimiter, getClientIp } from "../../../lib/rateLimit";
+import { verifyTurnstile } from "../../../lib/turnstile";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -19,6 +20,14 @@ export async function POST(request) {
   const rawEmail = body?.email;
   const password = body?.password;
   const name = body?.name;
+  const turnstileToken = body?.turnstileToken;
+
+  // Checked before touching Mongo or bcrypt — a bot flood should get
+  // rejected as cheaply as possible, not after real work has happened.
+  const captchaOk = await verifyTurnstile(turnstileToken, ip);
+  if (!captchaOk) {
+    return NextResponse.json({ error: "Captcha verification failed — please try again" }, { status: 400 });
+  }
 
   if (!rawEmail || !password) {
     return NextResponse.json({ error: "Email and password are required" }, { status: 400 });

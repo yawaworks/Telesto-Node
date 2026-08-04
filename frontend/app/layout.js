@@ -21,6 +21,15 @@ export default function RootLayout({ children }) {
           src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
           strategy="beforeInteractive"
         />
+        {/* Cloudflare Turnstile — loaded globally (not per-page) since it's
+            used on login, signup, and forgot-password. `render=explicit`
+            means pages call window.turnstile.render(...) themselves
+            instead of it auto-rendering every div with the widget class —
+            needed because those forms mount/unmount conditionally. */}
+        <Script
+          src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
+          strategy="afterInteractive"
+        />
         <Providers>{children}</Providers>
       </body>
     </html>

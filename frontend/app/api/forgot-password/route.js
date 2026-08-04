@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import clientPromise from "../../../lib/mongodb";
 import { sendEmail } from "../../../lib/mailer";
 import { forgotPasswordLimiter, getClientIp } from "../../../lib/rateLimit";
+import { verifyTurnstile } from "../../../lib/turnstile";
 
 const RESET_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
 
@@ -13,7 +14,13 @@ export async function POST(request) {
     return NextResponse.json({ error: "Too many requests. Try again later." }, { status: 429 });
   }
 
-  const { email: rawEmail } = await request.json();
+  const { email: rawEmail, turnstileToken } = await request.json();
+
+  const captchaOk = await verifyTurnstile(turnstileToken, ip);
+  if (!captchaOk) {
+    return NextResponse.json({ error: "Captcha verification failed — please try again" }, { status: 400 });
+  }
+
   if (!rawEmail) {
     return NextResponse.json({ error: "Email is required" }, { status: 400 });
   }

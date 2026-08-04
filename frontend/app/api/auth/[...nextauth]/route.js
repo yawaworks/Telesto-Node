@@ -5,6 +5,8 @@ import { MongoDBAdapter } from "@auth/mongodb-adapter";
 import bcrypt from "bcryptjs";
 import clientPromise from "../../../../lib/mongodb";
 import { loginLimiter } from "../../../../lib/rateLimit";
+import { verifyTurnstile } from "../../../../lib/turnstile";
+import { verifyTotpToken, findMatchingBackupCodeIndex } from "../../../../lib/twoFactor";
 
 // Used to keep authorize() constant-time when no user is found,
 // so response time doesn't reveal whether an email is registered.
@@ -27,11 +29,20 @@ export const authOptions = {
       credentials: {
         email: { label: "Email", type: "email" },
         password: { label: "Password", type: "password" },
+        turnstileToken: { label: "Turnstile Token", type: "text" },
+        totp: { label: "Two-Factor Code", type: "text" },
       },
-      async authorize(credentials) {
+      async authorize(credentials, req) {
         if (!credentials?.email || !credentials?.password) return null;
 
         const email = credentials.email.trim().toLowerCase();
+
+        // Captcha checked first and cheaply, before any rate-limit
+        // bucket or database work — a bot flood should get rejected as
+        // early as possible.
+        const remoteIp = req?.headers?.["x-forwarded-for"]?.split(",")[0]?.trim();
+        const captchaOk = await verifyTurnstile(credentials.turnstileToken, remoteIp);
+        if (!captchaOk) return null;
 
         const { success } = await loginLimiter.limit(email);
         if (!success) return null; // treated same as invalid credentials — avoids revealing why
@@ -50,6 +61,41 @@ export const authOptions = {
 
         const isValid = await bcrypt.compare(credentials.password, user.hashedPassword);
         if (!isValid) return null;
+
+        // Password is correct — now check 2FA if it's enabled on this
+        // account. Throwing a specific Error here (rather than just
+        // returning null) lets the login page distinguish "wrong
+        // password" from "right password, now enter your code" via
+        // result.error, since NextAuth's signIn() surfaces thrown
+        // messages as that field.
+        if (user.twoFactorEnabled) {
+          if (!credentials.totp) {
+            throw new Error("2FA_REQUIRED");
+          }
+
+          let totpValid = verifyTotpToken(user.twoFactorSecret, credentials.totp);
+
+          // A backup code is a one-time-use fallback for "I lost my
+          // authenticator app" — check it only if the primary TOTP check
+          // failed, and consume it (remove from the stored hash list) the
+          // moment it's used successfully.
+          if (!totpValid && Array.isArray(user.twoFactorBackupCodes)) {
+            const idx = await findMatchingBackupCodeIndex(credentials.totp, user.twoFactorBackupCodes);
+            if (idx !== -1) {
+              totpValid = true;
+              const remainingCodes = [...user.twoFactorBackupCodes];
+              remainingCodes.splice(idx, 1);
+              await users.updateOne(
+                { _id: user._id },
+                { $set: { twoFactorBackupCodes: remainingCodes } }
+              );
+            }
+          }
+
+          if (!totpValid) {
+            throw new Error("Invalid two-factor code");
+          }
+        }
 
         return { id: user._id.toString(), email: user.email, name: user.name || user.email };
       },
