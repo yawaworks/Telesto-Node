@@ -3,6 +3,14 @@ import os
 import time
 import httpx
 
+from app.europepmc_client import (
+    HISTOLOGY_KEYWORDS,
+    ULTRASTRUCTURE_KEYWORDS,
+    fetch_imaging_literature,
+)
+
+from app.morphosource_client import morphosource_search_url
+
 # Wikimedia's API etiquette policy requires a descriptive User-Agent
 # identifying the application and a contact method — requests without one
 # can be throttled or rejected outright. This was the actual cause of
@@ -534,6 +542,8 @@ async def get_species_info(species_name: str) -> dict:
             (inat_photos, inat_debug),
             (bhl_illustration, bhl_debug),
             (iucn_status, iucn_debug),
+            (histology_papers, histology_debug),
+            (ultrastructure_papers, ultrastructure_debug),
         ) = await asyncio.gather(
             _fetch_wikipedia_with_fallback(client, common_name, scientific_name),
             _fetch_obis_taxon(client, scientific_name),
@@ -543,6 +553,8 @@ async def get_species_info(species_name: str) -> dict:
             _fetch_inaturalist_photos(client, scientific_name),
             _fetch_bhl_illustration(client, scientific_name),
             _fetch_iucn_status(client, scientific_name),
+            fetch_imaging_literature(client, scientific_name, HISTOLOGY_KEYWORDS, "europepmc_histology"),
+            fetch_imaging_literature(client, scientific_name, ULTRASTRUCTURE_KEYWORDS, "europepmc_ultrastructure"),
         )
         debug_attempts.extend(wiki_debug)
         debug_attempts.append(obis_debug)
@@ -552,6 +564,8 @@ async def get_species_info(species_name: str) -> dict:
         debug_attempts.append(inat_debug)
         debug_attempts.append(bhl_debug)
         debug_attempts.append(iucn_debug)
+        debug_attempts.append(histology_debug)
+        debug_attempts.append(ultrastructure_debug)
 
         photos = []
         diagrams = []
@@ -598,6 +612,24 @@ async def get_species_info(species_name: str) -> dict:
         if diagrams:
             data["diagrams"] = diagrams
 
+        # Category 3 (Anatomical/Internal) — a real link to MorphoSource's
+        # own search, not an in-app gallery (see morphosource_client.py
+        # for why). Always present since it costs nothing to construct —
+        # the frontend decides whether coverage is worth surfacing, and a
+        # researcher can always just click through and see for themselves.
+        data["anatomical_search_url"] = morphosource_search_url(scientific_name)
+
+        # Categories 4 & 5 (Histological/Cellular, Ultrastructural) — real
+        # open-access literature whose title/abstract match the imaging
+        # modality, from Europe PMC. These are LITERATURE LINKS, not
+        # extracted figure images — see europepmc_client.py for why that
+        # distinction matters. Only attached if something actually came
+        # back, same pattern as photos/diagrams above.
+        if histology_papers:
+            data["histological_literature"] = histology_papers
+        if ultrastructure_papers:
+            data["ultrastructural_literature"] = ultrastructure_papers
+
         if iucn_status:
             data["conservation_status"] = iucn_status
 
@@ -639,6 +671,6 @@ async def get_species_info(species_name: str) -> dict:
     # the frontend modal doesn't render this field.
     data["_debug"] = debug_attempts
 
-    data["_source"] = "wikipedia_obis_openalex_semanticscholar_crossref_inaturalist_bhl_iucn"
+    data["_source"] = "wikipedia_obis_openalex_semanticscholar_crossref_inaturalist_bhl_iucn_europepmc_morphosource"
     _cache[species_name] = {"data": data, "cached_at": time.time()}
     return data

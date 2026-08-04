@@ -45,6 +45,15 @@ from app.weight_estimate import estimate_weight_grams, fishbase_search_url
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
+import sys
+from pathlib import Path
+
+# Automatically adds the 'backend' folder to Python's module search paths
+file_path = Path(__file__).resolve()
+backend_dir = file_path.parent.parent  # Points to 'backend' folder
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
+
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 INTERNAL_SYNC_SECRET = os.getenv("INTERNAL_SYNC_SECRET", "")
 

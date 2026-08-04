@@ -506,6 +506,27 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [], onV
                     </button>
                   )}
 
+                  {/* Anatomical/Internal (Category 3) — a real link to
+                      MorphoSource's own search, not an in-app gallery.
+                      MorphoSource's public API couldn't be verified from
+                      this environment (see morphosource_client.py), so
+                      this links out rather than pretending to embed CT
+                      scans we haven't confirmed exist or load correctly.
+                      Coverage is genuinely thin for coral/invertebrates —
+                      MorphoSource grew out of a vertebrate-focused
+                      project — the link still works, it may just come
+                      back empty for those species. */}
+                  {speciesData.anatomical_search_url && (
+                    <a
+                      href={speciesData.anatomical_search_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block w-full text-center bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-2 text-[10px] uppercase tracking-widest text-[#b7c4cc] hover:bg-white/[0.08]"
+                    >
+                      Search MorphoSource for CT/anatomical scans ↗
+                    </a>
+                  )}
+
                   {/* Photos / Diagrams tabs — real multi-source galleries
                       (Wikipedia + iNaturalist for photos, Wikipedia's SVG
                       technical images for diagrams) instead of a single
@@ -581,6 +602,70 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [], onV
                           </>
                         );
                       })()}
+                    </div>
+                  )}
+
+                  {/* Histological/Cellular (Category 4) and Ultrastructural
+                      (Category 5) — real Europe PMC open-access literature
+                      whose title/abstract match the imaging modality, NOT
+                      extracted figure images (see europepmc_client.py for
+                      why that distinction matters). Only shown when
+                      something actually matched — most species will have
+                      nothing here, and that's the honest result, not a
+                      bug. */}
+                  {speciesData.histological_literature?.length > 0 && (
+                    <div className="pt-1.5 border-t border-[#3a444a]">
+                      <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad] mb-1.5">
+                        Histological literature
+                      </p>
+                      <p className="text-[#5a6a72] mb-1.5">
+                        Open-access papers likely containing tissue/cellular imagery — view the actual figures on the paper itself.
+                      </p>
+                      <ul className="space-y-2">
+                        {speciesData.histological_literature.map((paper, i) => (
+                          <li key={i}>
+                            <a
+                              href={paper.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[#b7c4cc] hover:text-[#d3dbe0] underline"
+                            >
+                              {paper.title}
+                            </a>
+                            <p className="text-[#5a6a72]">
+                              {[paper.authors, paper.journal, paper.year].filter(Boolean).join(" · ")}
+                            </p>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {speciesData.ultrastructural_literature?.length > 0 && (
+                    <div className="pt-1.5 border-t border-[#3a444a]">
+                      <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad] mb-1.5">
+                        Ultrastructural literature (SEM/TEM)
+                      </p>
+                      <p className="text-[#5a6a72] mb-1.5">
+                        Open-access papers likely containing electron-microscopy imagery — view the actual figures on the paper itself.
+                      </p>
+                      <ul className="space-y-2">
+                        {speciesData.ultrastructural_literature.map((paper, i) => (
+                          <li key={i}>
+                            <a
+                              href={paper.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[#b7c4cc] hover:text-[#d3dbe0] underline"
+                            >
+                              {paper.title}
+                            </a>
+                            <p className="text-[#5a6a72]">
+                              {[paper.authors, paper.journal, paper.year].filter(Boolean).join(" · ")}
+                            </p>
+                          </li>
+                        ))}
+                      </ul>
                     </div>
                   )}
 
