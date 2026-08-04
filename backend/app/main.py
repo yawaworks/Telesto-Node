@@ -36,6 +36,7 @@ from app.cloudinary_client import delete_clip, upload_clip, upload_snapshot
 from app.db import get_db, is_connected
 from app.inference import clahe_correct, coral_bleaching_ratio, predict_with_roboflow
 from app.obis_client import fetch_obis_species_data
+from app.optical_flow import estimate_motion_from_frame, reset_motion_tracking
 from app.report import generate_mission_report, log_detections
 from app.report_email import send_mission_report_email
 from app.species_info import get_species_info
@@ -83,6 +84,11 @@ class FrameAnalysisResponse(BaseModel):
     boxes: List[BoundingBox]
     classifications: List[Classification] = []
     coral_bleaching_ratio: Optional[float] = None
+    # Genuinely video-derived motion (dense optical flow between this
+    # frame and the previous one) — see app/optical_flow.py. None on the
+    # very first frame of a clip (nothing to compare against yet) or
+    # whenever the source has just been reset.
+    optical_flow: Optional[dict] = None
 
 
 class SpeciesSyncRecord(BaseModel):
@@ -165,6 +171,11 @@ async def analyze_frame(
 
     frame = clahe_correct(frame)
 
+    # Runs against the same CLAHE-corrected frame Roboflow sees, purely
+    # from pixel motion — no simulated fallback if this comes back None,
+    # the frontend just doesn't show a motion reading for that frame.
+    motion = estimate_motion_from_frame(frame)
+
     try:
         result = predict_with_roboflow(frame, conf_threshold=conf_threshold)
     except Exception as exc:
@@ -210,8 +221,20 @@ async def analyze_frame(
         )
 
     return FrameAnalysisResponse(
-        boxes=boxes, classifications=classifications, coral_bleaching_ratio=frame_ratio
+        boxes=boxes, classifications=classifications, coral_bleaching_ratio=frame_ratio,
+        optical_flow=motion,
     )
+
+
+@app.post("/reset-motion-tracking")
+@limiter.limit("30/minute")
+async def reset_motion_tracking_endpoint(request: Request):
+    """Call whenever the video source changes (default clip <-> upload
+    <-> webcam <-> URL) — otherwise optical flow compares the first frame
+    of the new source against the last frame of whatever was playing
+    before, and reports meaningless motion for one frame."""
+    reset_motion_tracking()
+    return {"reset": True}
 
 
 class SnapshotResponse(BaseModel):

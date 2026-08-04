@@ -125,7 +125,7 @@ export default function MissionControl() {
   const [sharedSnapshots, setSharedSnapshots] = useState([]);
   const [snapshotLibraryLoading, setSnapshotLibraryLoading] = useState(false);
 
-  const { boxes, ghostBoxes, coralBleachingRatio, status } = useFrameDetection(videoRef, {
+  const { boxes, ghostBoxes, coralBleachingRatio, opticalFlow, status } = useFrameDetection(videoRef, {
     enabled: viewMode === "video" && !videoLoadError,
     telemetry,
     alertEmail: session?.user?.email,
@@ -191,6 +191,14 @@ export default function MissionControl() {
       video.src = nextSrc;
       video.play().catch(() => {});
     }
+
+    // The backend's optical-flow estimator compares each new frame to
+    // the previous one it saw — without this, switching sources (e.g.
+    // default clip -> upload) would compare the first frame of the new
+    // clip against the last frame of the old one and report meaningless
+    // motion for a frame. Fire-and-forget: a failed reset just means one
+    // stale-looking motion reading, not worth blocking on.
+    fetch(`${API_BASE_URL}/reset-motion-tracking`, { method: "POST" }).catch(() => {});
   }, [videoSourceMode, uploadedVideoUrl, videoUrlInput]);
 
   useEffect(() => {
@@ -836,6 +844,16 @@ export default function MissionControl() {
               : telemetry.heading}
           </p>
         </div>
+        {!isMapMode && opticalFlow && opticalFlow.magnitude >= 0.05 && (
+          <div className="px-3 sm:px-4 py-2 sm:py-2.5">
+            <p className="text-[10px] uppercase tracking-widest text-[#7de88f]">
+              Motion · derived from feed
+            </p>
+            <p className="text-sm">
+              {opticalFlow.heading_delta_deg}° drift · mag {opticalFlow.magnitude}
+            </p>
+          </div>
+        )}
         {!isMapMode && coralBleachingRatio !== null && (
           <div className="px-3 sm:px-4 py-2 sm:py-2.5">
             <p className="text-[10px] uppercase tracking-widest text-[#d8b877]">Coral · unvalidated model</p>

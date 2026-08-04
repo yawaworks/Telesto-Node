@@ -48,6 +48,12 @@ export function useFrameDetection(videoRef, { enabled = true, telemetry, alertEm
   const [ghostBoxes, setGhostBoxes] = useState([]);
   const [classifications, setClassifications] = useState([]);
   const [coralBleachingRatio, setCoralBleachingRatio] = useState(null);
+  // { heading_delta_deg, magnitude } | null — dense optical flow computed
+  // backend-side between this frame and the previous one (app/optical_flow.py).
+  // Genuinely derived from the video's pixels, not simulated. Null on the
+  // first frame of a clip or right after a source switch, since there's
+  // nothing to compare against yet.
+  const [opticalFlow, setOpticalFlow] = useState(null);
   const [status, setStatus] = useState("idle");
   const canvasRef = useRef(null);
   const inFlightRef = useRef(false);
@@ -82,6 +88,7 @@ export function useFrameDetection(videoRef, { enabled = true, telemetry, alertEm
       // to, so clear the slate whenever detection is turned off.
       recentDetectionsRef.current.clear();
       setGhostBoxes([]);
+      setOpticalFlow(null);
       return;
     }
 
@@ -210,6 +217,7 @@ export function useFrameDetection(videoRef, { enabled = true, telemetry, alertEm
         setCoralBleachingRatio(
           data.coral_bleaching_ratio === undefined ? null : data.coral_bleaching_ratio
         );
+        setOpticalFlow(data.optical_flow ?? null);
         setStatus("live");
       } catch (err) {
         if (!cancelled) {
@@ -235,5 +243,5 @@ export function useFrameDetection(videoRef, { enabled = true, telemetry, alertEm
     };
   }, [videoRef, enabled]);
 
-  return { boxes, ghostBoxes, classifications, coralBleachingRatio, status };
+  return { boxes, ghostBoxes, classifications, coralBleachingRatio, opticalFlow, status };
 }
