@@ -10,6 +10,7 @@ const TOOLS = [
   { id: "arrow", label: "Arrow" },
   { id: "rect", label: "Box" },
   { id: "text", label: "Text" },
+  { id: "measure", label: "Measure" },
   { id: "eraser", label: "Eraser" },
   { id: "crop", label: "Crop" },
 ];
@@ -47,7 +48,7 @@ function strokeNear(stroke, point, radius) {
   if (stroke.type === "pen" || stroke.type === "highlighter") {
     return (stroke.points || []).some((p) => dist(p, point) < radius);
   }
-  if (stroke.type === "arrow") {
+  if (stroke.type === "arrow" || stroke.type === "measure") {
     if (!stroke.start || !stroke.end) return false;
     return distToSegment(point, stroke.start, stroke.end) < radius;
   }
@@ -118,8 +119,6 @@ function drawStroke(ctx, stroke) {
     ctx.lineWidth = stroke.width;
     const headLength = Math.max(14, stroke.width * 4.5);
     const angle = Math.atan2(stroke.end.y - stroke.start.y, stroke.end.x - stroke.start.x);
-    // Pull the shaft back slightly so it doesn't poke out past the
-    // triangle's back edge — makes the arrowhead read as one solid shape.
     const shaftEnd = {
       x: stroke.end.x - Math.cos(angle) * headLength * 0.5,
       y: stroke.end.y - Math.sin(angle) * headLength * 0.5,
@@ -129,6 +128,22 @@ function drawStroke(ctx, stroke) {
     ctx.lineTo(shaftEnd.x, shaftEnd.y);
     ctx.stroke();
     drawArrowhead(ctx, stroke.start, stroke.end, stroke.color, headLength);
+  } else if (stroke.type === "measure") {
+    ctx.strokeStyle = stroke.color;
+    ctx.lineWidth = stroke.width;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(stroke.start.x, stroke.start.y);
+    ctx.lineTo(stroke.end.x, stroke.end.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    if (stroke.label) {
+      ctx.font = "12px monospace";
+      ctx.fillStyle = stroke.color;
+      const midX = (stroke.start.x + stroke.end.x) / 2;
+      const midY = (stroke.start.y + stroke.end.y) / 2;
+      ctx.fillText(stroke.label, midX + 4, midY - 4);
+    }
   } else if (stroke.type === "rect") {
     ctx.strokeStyle = stroke.color;
     ctx.lineWidth = stroke.width;
@@ -153,10 +168,10 @@ function drawCropMarquee(ctx, sel, canvasW, canvasH) {
 
   ctx.save();
   ctx.fillStyle = "rgba(0,0,0,0.55)";
-  ctx.fillRect(0, 0, canvasW, y); // top
-  ctx.fillRect(0, y + h, canvasW, canvasH - (y + h)); // bottom
-  ctx.fillRect(0, y, x, h); // left
-  ctx.fillRect(x + w, y, canvasW - (x + w), h); // right
+  ctx.fillRect(0, 0, canvasW, y);
+  ctx.fillRect(0, y + h, canvasW, canvasH - (y + h));
+  ctx.fillRect(0, y, x, h);
+  ctx.fillRect(x + w, y, canvasW - (x + w), h);
   ctx.restore();
 
   ctx.strokeStyle = "#8fa3ad";
@@ -166,17 +181,6 @@ function drawCropMarquee(ctx, sel, canvasW, canvasH) {
   ctx.setLineDash([]);
 }
 
-/**
- * A screenshot-tool-style annotation editor for Discovery Snapshots.
- *
- * mode="new"  — imageSrc is a freshly captured data URL, not saved yet.
- * mode="view" — imageSrc is an existing saved snapshot's Cloudinary URL.
- *               Re-annotating and saving creates a NEW snapshot entry
- *               (the original stays intact).
- *
- * Everything here is in-page (inline text editing, inline delete
- * confirmation) — no window.prompt/confirm browser dialogs.
- */
 export default function SnapshotAnnotator({
   open,
   mode = "new",
@@ -194,34 +198,28 @@ export default function SnapshotAnnotator({
   const [imageLoaded, setImageLoaded] = useState(false);
 
   const [strokes, setStrokes] = useState([]);
-  // strokesRef mirrors `strokes` and is what redraw() actually reads from.
-  // Drawing must be synchronous and immediate — waiting on a useEffect
-  // keyed to the `strokes` state was causing committed annotations to
-  // flash and then vanish under certain render-timing conditions. `strokes`
-  // state still exists purely to drive UI (the "Remove annotations"
-  // disabled state, etc.); it is never read for actual rendering.
   const strokesRef = useRef([]);
   function setStrokesBoth(next) {
     strokesRef.current = next;
     setStrokes(next);
   }
-  const [history, setHistory] = useState([]); // past strokes-array snapshots, for Undo
-  const [future, setFuture] = useState([]); // undone snapshots, for Redo
+  const [history, setHistory] = useState([]);
+  const [future, setFuture] = useState([]);
   const [tool, setTool] = useState("pen");
   const [color, setColor] = useState(SWATCHES[0]);
   const [width, setWidth] = useState(3);
-  const drawingRef = useRef(null); // in-progress stroke, not yet committed
+  const drawingRef = useRef(null);
 
-  const [cropSelection, setCropSelection] = useState(null); // { start, end } | null
+  const [calibration, setCalibration] = useState(null); // { pxPerCm } | null
+  const [calibratePrompt, setCalibratePrompt] = useState(null); // { start, end, pixelLength, value } | null
+
+  const [cropSelection, setCropSelection] = useState(null);
 
   const [zoomFactor, setZoomFactor] = useState(1);
   const [manualZoom, setManualZoom] = useState(false);
   const fitWidthRef = useRef(null);
 
-  // Inline text editor overlay — position is in canvas-pixel space,
-  // rendered via percentage offsets so it stays aligned as the canvas
-  // scales with the viewport.
-  const [textEditor, setTextEditor] = useState(null); // { x, y, value } | null
+  const [textEditor, setTextEditor] = useState(null);
 
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -236,6 +234,8 @@ export default function SnapshotAnnotator({
     setHistory([]);
     setFuture([]);
     setCropSelection(null);
+    setCalibration(null);
+    setCalibratePrompt(null);
     setManualZoom(false);
     setZoomFactor(1);
     setMessage(null);
@@ -258,8 +258,6 @@ export default function SnapshotAnnotator({
     img.src = imageSrc;
   }, [open, imageSrc]);
 
-  // Measure the "fit to container" width once the image first lays out,
-  // so Zoom In/Out has a sensible 100% baseline to scale from.
   useEffect(() => {
     if (!imageLoaded) return;
     const raf = requestAnimationFrame(() => {
@@ -292,9 +290,6 @@ export default function SnapshotAnnotator({
         drawCropMarquee(ctx, cropSelection, canvas.width, canvas.height);
       }
     } catch (err) {
-      // Never let a canvas-drawing error take down the whole page — log
-      // it with full context so the real cause is visible next time, and
-      // just skip this frame instead of crashing.
       console.error("SnapshotAnnotator redraw failed:", err, {
         previewStroke,
         strokeCount: strokesRef.current.length,
@@ -303,9 +298,6 @@ export default function SnapshotAnnotator({
     }
   }
 
-  // Only the initial image load (and crop-selection marquee) need the
-  // effect to trigger a redraw — every stroke-committing action below
-  // calls redraw() itself, synchronously, right after updating strokesRef.
   useEffect(() => {
     if (imageLoaded) redraw();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -337,10 +329,35 @@ export default function SnapshotAnnotator({
     });
   }
 
+  function commitCalibration() {
+    if (!calibratePrompt) return;
+    const cm = parseFloat(calibratePrompt.value);
+    if (!cm || cm <= 0) {
+      setCalibratePrompt(null);
+      return;
+    }
+    const pxPerCm = calibratePrompt.pixelLength / cm;
+    setCalibration({ pxPerCm });
+    pushHistory();
+    const next = [
+      ...strokesRef.current,
+      {
+        type: "measure",
+        start: calibratePrompt.start,
+        end: calibratePrompt.end,
+        color,
+        width,
+        label: `${cm} cm (reference)`,
+      },
+    ];
+    setStrokesBoth(next);
+    redraw();
+    setCalibratePrompt(null);
+  }
+
   function handlePointerDown(e) {
     if (!imageLoaded) return;
     try {
-      // A click elsewhere while the text box is open commits it first.
       if (textEditor) {
         commitTextEditor();
         return;
@@ -355,7 +372,7 @@ export default function SnapshotAnnotator({
       }
 
       if (tool === "eraser") {
-        pushHistory(); // one history step per erase-drag, not per pixel
+        pushHistory();
         const next = strokesRef.current.filter((s) => !strokeNear(s, point, ERASER_RADIUS));
         setStrokesBoth(next);
         redraw();
@@ -397,9 +414,6 @@ export default function SnapshotAnnotator({
       }
       redraw(drawingRef.current);
     } catch (err) {
-      // Confirmed crash site in a prior session — log full context so the
-      // real cause is visible if it recurs, and abandon this stroke
-      // cleanly instead of letting it take down the whole page.
       console.error("SnapshotAnnotator pointer-move failed:", err, {
         tool,
         drawing: drawingRef.current,
@@ -416,6 +430,32 @@ export default function SnapshotAnnotator({
         if (Math.abs(end.x - start.x) > 4 && Math.abs(end.y - start.y) > 4) {
           setCropSelection({ start, end });
         }
+        return;
+      }
+
+      if (drawingRef.current.type === "measure") {
+        const { start, end } = drawingRef.current;
+        const pixelLength = dist(start, end);
+        if (pixelLength < 3) {
+          drawingRef.current = null;
+          return;
+        }
+
+        if (!calibration) {
+          setCalibratePrompt({ start, end, pixelLength, value: "" });
+          drawingRef.current = null;
+          return;
+        }
+
+        const cm = (pixelLength / calibration.pxPerCm).toFixed(1);
+        pushHistory();
+        const next = [
+          ...strokesRef.current,
+          { type: "measure", start, end, color, width, label: `${cm} cm` },
+        ];
+        setStrokesBoth(next);
+        redraw();
+        drawingRef.current = null;
         return;
       }
 
@@ -475,10 +515,6 @@ export default function SnapshotAnnotator({
       return;
     }
 
-    // Crop bakes in whatever's currently drawn (image + annotations) into
-    // a new base image, same as most screenshot tools — you can keep
-    // annotating on top of the cropped result, but the crop itself can't
-    // be undone once applied.
     const off = document.createElement("canvas");
     off.width = w;
     off.height = h;
@@ -494,6 +530,8 @@ export default function SnapshotAnnotator({
       setHistory([]);
       setFuture([]);
       setCropSelection(null);
+      setCalibration(null);
+      setCalibratePrompt(null);
       setManualZoom(false);
       setZoomFactor(1);
       setTool("pen");
@@ -551,6 +589,10 @@ export default function SnapshotAnnotator({
       const formData = new FormData();
       formData.append("file", blob, `snapshot-${Date.now()}.jpg`);
 
+      const measurements = strokes
+        .filter((s) => s.type === "measure")
+        .map((s) => s.label);
+
       const params = new URLSearchParams({
         depth: telemetry.depth || "",
         coords: telemetry.coords || "",
@@ -561,6 +603,8 @@ export default function SnapshotAnnotator({
         owner_email: ownerEmail || "",
         annotated: strokes.length > 0 ? "true" : "false",
         shared: shareOverride ? "true" : "false",
+        measurements: JSON.stringify(measurements),
+        calibrated: calibration ? "true" : "false",
       });
 
       const res = await fetch(`${API_BASE_URL}/snapshot?${params}`, {
@@ -601,8 +645,6 @@ export default function SnapshotAnnotator({
         return;
       }
 
-      // Fallback: save it first (if not already saved) to get a stable
-      // URL, then copy that link to the clipboard.
       const saved = await handleSaveToLibrary();
       if (saved?.url && navigator.clipboard) {
         await navigator.clipboard.writeText(saved.url);
@@ -695,9 +737,6 @@ export default function SnapshotAnnotator({
                 style={{ backgroundColor: c }}
               />
             ))}
-            {/* Full color picker, like MS Paint's "Edit colors" — native
-                browser color dialog gives access to the entire spectrum,
-                not just the swatch presets above. */}
             <label
               className="relative w-5 h-5 rounded-full border-2 border-dashed border-[#5a6a72] cursor-pointer overflow-hidden flex items-center justify-center"
               title="Pick any color"
@@ -774,6 +813,15 @@ export default function SnapshotAnnotator({
             >
               +
             </button>
+            {calibration && (
+              <button
+                onClick={() => setCalibration(null)}
+                className="ml-2 text-[10px] uppercase tracking-widest text-[#8fa3ad] hover:text-[#d3dbe0] border border-[#3a444a] rounded px-1.5 py-0.5"
+                title="Reset scale calibration for this frame"
+              >
+                Recalibrate
+              </button>
+            )}
           </div>
 
           {tool === "crop" && (
@@ -832,6 +880,40 @@ export default function SnapshotAnnotator({
                 style={textEditorStyle}
                 className="absolute bg-black/60 border border-[#8fa3ad] rounded px-1.5 py-0.5 text-sm outline-none min-w-[140px]"
               />
+            )}
+            {calibratePrompt && (
+              <div
+                className="absolute bg-[#1c2226] border border-[#8fa3ad] rounded-lg p-3 z-10 text-xs"
+                style={{
+                  left: `${(calibratePrompt.start.x / (canvasRef.current?.width || 1)) * 100}%`,
+                  top: `${(calibratePrompt.start.y / (canvasRef.current?.height || 1)) * 100}%`,
+                }}
+              >
+                <p className="text-[#8fa3ad] mb-1.5">Real-world length of this line (cm)?</p>
+                <p className="text-[#5a6a72] mb-2">
+                  Calibrates scale for THIS frame only — a reference object of known size needs to be visible in shot for this to be accurate.
+                </p>
+                <input
+                  autoFocus
+                  type="number"
+                  step="0.1"
+                  value={calibratePrompt.value}
+                  onChange={(e) =>
+                    setCalibratePrompt((c) => (c ? { ...c, value: e.target.value } : null))
+                  }
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") commitCalibration();
+                    if (e.key === "Escape") setCalibratePrompt(null);
+                  }}
+                  className="bg-black/30 border border-[#3a444a] rounded px-2 py-1 text-sm w-24 mr-2 text-white"
+                />
+                <button
+                  onClick={commitCalibration}
+                  className="bg-[#8fa3ad]/10 border border-[#8fa3ad]/60 rounded px-2 py-1 text-[10px] uppercase text-[#d3dbe0] hover:bg-[#8fa3ad]/20"
+                >
+                  Set scale
+                </button>
+              </div>
             )}
           </div>
         </div>

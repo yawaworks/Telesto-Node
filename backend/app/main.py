@@ -1,7 +1,10 @@
+import json
 import math
 import re
 from typing import List, Optional
-
+import xml.etree.ElementTree as ET
+from app.dive_log import parse_uddf, sample_at
+from app.gpmf_client import extract_video_telemetry
 from dotenv import load_dotenv
 
 # Must run BEFORE importing app.inference or app.alerts, since both read
@@ -13,7 +16,7 @@ import os
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
@@ -37,6 +40,7 @@ from app.report import generate_mission_report, log_detections
 from app.report_email import send_mission_report_email
 from app.species_info import get_species_info
 from app.telemetry import TelemetrySimulator, MISSION_LAT, MISSION_LNG
+from app.weight_estimate import estimate_weight_grams, fishbase_search_url
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
@@ -92,6 +96,12 @@ class SpeciesSyncRecord(BaseModel):
 
 class SpeciesSyncPayload(BaseModel):
     records: List[SpeciesSyncRecord]
+
+
+class WeightEstimateRequest(BaseModel):
+    length_cm: float
+    a: float
+    b: float
 
 
 def _clean(value):
@@ -342,19 +352,20 @@ async def remove_clip(request: Request, clip_id: str, owner_email: str):
 async def create_snapshot(
     request: Request,
     file: UploadFile = File(...),
-    depth: str = "",
-    coords: str = "",
-    temp: str = "",
-    salinity: str = "",
-    heading: str = "",
-    species_query: str = "",
+    depth: str = Form(""),
+    coords: str = Form(""),
+    temp: str = Form(""),
+    salinity: str = Form(""),
+    heading: str = Form(""),
+    species_query: str = Form(""),
+    measurements: str = Form(""),  # JSON array of "X.X cm" labels, researcher-calibrated, this frame only
 ):
     """Uploads a Discovery Snapshot (triggered by the gamepad's 'A' button)
     to Cloudinary, then logs a record of it — image URL plus whatever
-    mission telemetry/species context was active at capture time — to
-    Mongo if it's connected. Falls back to upload-only (no DB record) if
-    Mongo is currently down, same graceful-degradation pattern used
-    elsewhere in this API."""
+    mission telemetry/species context and researcher measurements were active
+    at capture time — to Mongo if it's connected. Falls back to upload-only
+    (no DB record) if Mongo is currently down, same graceful-degradation
+    pattern used elsewhere in this API."""
     raw_bytes = await file.read()
 
     try:
@@ -365,6 +376,11 @@ async def create_snapshot(
     saved_to_db = False
     db = get_db()
     if db is not None:
+        try:
+            parsed_measurements = json.loads(measurements) if measurements else []
+        except Exception:
+            parsed_measurements = []
+
         try:
             db["snapshots"].insert_one(
                 {
@@ -379,6 +395,7 @@ async def create_snapshot(
                         "heading": heading,
                     },
                     "species_query": species_query,
+                    "measurements": parsed_measurements,
                 }
             )
             saved_to_db = True
@@ -392,6 +409,30 @@ async def create_snapshot(
         public_id=upload_result["public_id"],
         saved_to_db=saved_to_db,
     )
+
+
+@app.post("/extract-video-metadata")
+@limiter.limit("10/minute")
+async def extract_video_metadata(request: Request, file: UploadFile = File(...)):
+    """Extracts telemetry streams (e.g., GPMF metadata from GoPro or action cameras)
+    embedded in an uploaded video file."""
+    raw_bytes = await file.read()
+    return extract_video_telemetry(raw_bytes, filename_hint=file.filename or "upload.mp4")
+
+
+@app.post("/estimate-weight")
+@limiter.limit("60/minute")
+def estimate_weight(request: Request, payload: WeightEstimateRequest):
+    """Calculates estimated fish weight in grams using the standard length-weight
+    relationship formula: W = a * L^b."""
+    return {"weight_g": estimate_weight_grams(payload.length_cm, payload.a, payload.b)}
+
+
+@app.get("/fishbase-link")
+@limiter.limit("60/minute")
+def fishbase_link(request: Request, scientific_name: str):
+    """Generates a direct search URL to FishBase for a given species' scientific name."""
+    return {"url": fishbase_search_url(scientific_name)}
 
 
 @app.get("/export-report")
@@ -707,3 +748,60 @@ async def telemetry_socket(websocket: WebSocket):
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         pass
+
+
+class DiveLogUploadResponse(BaseModel):
+    id: str
+    sample_count: int
+    duration_seconds: float
+    depth_range_m: List[float]
+    has_temp: bool
+
+@app.post("/dive-log", response_model=DiveLogUploadResponse)
+@limiter.limit("10/minute")
+async def upload_dive_log(request: Request, file: UploadFile = File(...), owner_email: str = ""):
+    raw = await file.read()
+    try:
+        samples = parse_uddf(raw)
+    except ET.ParseError:
+        raise HTTPException(status_code=400, detail="Couldn't parse that file as UDDF XML")
+    if not samples:
+        raise HTTPException(status_code=400, detail="No depth/time waypoints found in this file")
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Dive log storage unavailable right now")
+
+    depths = [s["depth_m"] for s in samples]
+    doc = {
+        "owner_email": owner_email,
+        "samples": samples,
+        "uploaded_at": datetime.now(timezone.utc),
+    }
+    result = db["dive_logs"].insert_one(doc)
+
+    return DiveLogUploadResponse(
+        id=str(result.inserted_id),
+        sample_count=len(samples),
+        duration_seconds=samples[-1]["elapsed_seconds"],
+        depth_range_m=[min(depths), max(depths)],
+        has_temp=any("temp_c" in s for s in samples),
+    )
+
+@app.get("/dive-log/{dive_log_id}/at")
+@limiter.limit("120/minute")
+async def dive_log_at(request: Request, dive_log_id: str, elapsed_seconds: float):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Dive log storage unavailable right now")
+    try:
+        oid = ObjectId(dive_log_id)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid dive log id")
+    doc = db["dive_logs"].find_one({"_id": oid})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Dive log not found")
+    sample = sample_at(doc["samples"], elapsed_seconds)
+    if sample is None:
+        raise HTTPException(status_code=404, detail="No samples in this log")
+    return {"depth_m": sample.get("depth_m"), "temp_c": sample.get("temp_c"), "source": "dive_log"}

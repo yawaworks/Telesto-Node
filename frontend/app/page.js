@@ -53,6 +53,7 @@ export default function MissionControl() {
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
   const fileInputRef = useRef(null);
+  const diveLogInputRef = useRef(null);
   const webcamStreamRef = useRef(null);
 
   const { telemetry } = useTelemetry();
@@ -95,6 +96,7 @@ export default function MissionControl() {
   const [webcamError, setWebcamError] = useState(null);
   const [videoUrlInput, setVideoUrlInput] = useState("");
   const [videoLoadError, setVideoLoadError] = useState(false);
+  const [videoGpsInfo, setVideoGpsInfo] = useState(null);
 
   const [uploadedFile, setUploadedFile] = useState(null);
   const [savingClip, setSavingClip] = useState(false);
@@ -105,6 +107,10 @@ export default function MissionControl() {
   const [myClips, setMyClips] = useState([]);
   const [sharedClips, setSharedClips] = useState([]);
   const [libraryLoading, setLibraryLoading] = useState(false);
+
+  const [diveLogId, setDiveLogId] = useState(null);
+  const [diveLogSampleCount, setDiveLogSampleCount] = useState(0);
+  const [diveLogSample, setDiveLogSample] = useState(null);
 
   const [annotatorOpen, setAnnotatorOpen] = useState(false);
   const [annotatorMode, setAnnotatorMode] = useState("new");
@@ -196,6 +202,31 @@ export default function MissionControl() {
     };
   }, []);
 
+  // Poll dive log for current playback position
+  useEffect(() => {
+    if (!diveLogId) {
+      setDiveLogSample(null);
+      return;
+    }
+
+    const interval = setInterval(() => {
+      const video = videoRef.current;
+      if (!video) return;
+
+      const elapsedSeconds = video.currentTime || 0;
+      fetch(`${API_BASE_URL}/dive-log/${diveLogId}/at?elapsed_seconds=${elapsedSeconds}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then((data) => {
+          if (data && !data.error) {
+            setDiveLogSample(data);
+          }
+        })
+        .catch(() => {});
+    }, 500);
+
+    return () => clearInterval(interval);
+  }, [diveLogId]);
+
   function handleUploadClick() {
     fileInputRef.current?.click();
   }
@@ -214,6 +245,32 @@ export default function MissionControl() {
     setVideoSourceMode("upload");
     setWebcamError(null);
     setClipSaveMessage(null);
+    setVideoGpsInfo(null);
+
+    const formData = new FormData();
+    formData.append("file", file);
+    fetch(`${API_BASE_URL}/extract-video-metadata`, { method: "POST", body: formData })
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.has_telemetry) {
+          setVideoGpsInfo(`Real GPS track detected — ${data.point_count} points from camera metadata`);
+        }
+      })
+      .catch(() => {});
+  }
+
+  async function handleDiveLogSelected(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append("file", file);
+    const params = new URLSearchParams({ owner_email: session?.user?.email || "" });
+    const res = await fetch(`${API_BASE_URL}/dive-log?${params}`, { method: "POST", body: formData });
+    if (res.ok) {
+      const data = await res.json();
+      setDiveLogId(data.id);
+      setDiveLogSampleCount(data.sample_count);
+    }
   }
 
   async function handleUseWebcam() {
@@ -339,9 +396,6 @@ export default function MissionControl() {
   }
 
   function handleSnapshotSaved() {
-    // A newly-saved (or re-annotated, or team-shared) snapshot should show
-    // up next time the gallery is opened, and nudge the count on the
-    // profile page.
     if (snapshotLibraryOpen) fetchSnapshots(snapshotLibraryScope);
   }
 
@@ -403,12 +457,19 @@ export default function MissionControl() {
       const t = telemetryRef.current;
       const detectedLabel = boxesRef.current?.[0]?.label;
 
+      const activeDepth = diveLogSample?.depth_m !== undefined
+        ? `${diveLogSample.depth_m.toFixed(1)} m`
+        : t.depth || "";
+      const activeTemp = diveLogSample?.temp_c !== undefined
+        ? `${diveLogSample.temp_c.toFixed(1)} °C`
+        : t.temp || "";
+
       setAnnotatorMode("new");
       setAnnotatorImageSrc(dataUrl);
       setAnnotatorTelemetry({
-        depth: t.depth || "",
+        depth: activeDepth,
         coords: t.coords || "",
-        temp: t.temp || "",
+        temp: activeTemp,
         salinity: t.salinity || "",
         heading: t.heading || "",
       });
@@ -426,10 +487,6 @@ export default function MissionControl() {
     handleDiscoverySnapshotRef.current = handleDiscoverySnapshot;
   });
 
-  // Shared by both the debounced live-typing search and the explicit
-  // "Plot" button submit, so both paths give identical feedback (result
-  // count, empty state, error) rather than the button silently working
-  // differently than typing does.
   async function runSpeciesSearch(query) {
     if (!mapRef.current || !query?.trim()) return;
 
@@ -438,8 +495,6 @@ export default function MissionControl() {
 
     const result = await loadSpeciesMarkers(mapRef.current, query.trim());
 
-    // A newer search started while this one was in flight — drop this
-    // result rather than let it overwrite the newer search's feedback.
     if (seq !== speciesSearchSeqRef.current) return;
 
     setSpeciesSearchStatus(result.status);
@@ -456,9 +511,6 @@ export default function MissionControl() {
       setSpeciesSearchStatus("idle");
       return;
     }
-    // Genshin-tracker-style live search: wait for a short pause in typing
-    // rather than searching on every keystroke, so a name like
-    // "Acropora cervicornis" doesn't fire a dozen requests while typed.
     speciesSearchDebounceRef.current = setTimeout(() => {
       runSpeciesSearch(value);
     }, 450);
@@ -472,11 +524,6 @@ export default function MissionControl() {
     runSpeciesSearch(speciesQuery);
   }
 
-  // Passed into DetectionOverlay's Species Inspector modal as
-  // onViewDistribution — switches to Bathymetry Map and immediately
-  // searches for this species there, reusing the map's existing
-  // fetch/fit-bounds logic rather than duplicating a second, redundant
-  // distribution-map feature inside the modal itself.
   function handleViewDistribution(scientificName) {
     setViewMode("map");
     setSpeciesQuery(scientificName);
@@ -486,7 +533,12 @@ export default function MissionControl() {
   async function handleExportReport() {
     setExportingReport(true);
     try {
-      const params = new URLSearchParams(telemetry);
+      const activeTelemetry = {
+        ...telemetry,
+        depth: diveLogSample?.depth_m !== undefined ? `${diveLogSample.depth_m.toFixed(1)} m` : telemetry.depth,
+        temp: diveLogSample?.temp_c !== undefined ? `${diveLogSample.temp_c.toFixed(1)} °C` : telemetry.temp,
+      };
+      const params = new URLSearchParams(activeTelemetry);
       const response = await fetch(`${API_BASE_URL}/export-report?${params}`);
       if (!response.ok) throw new Error(`Export failed: ${response.status}`);
 
@@ -506,11 +558,6 @@ export default function MissionControl() {
     }
   }
 
-  // Calls the backend directly to generate + email the mission report PDF
-  // via Resend. Previously went through an n8n webhook (Webhook -> Fetch
-  // Report PDF -> PDF to Base64 -> Send Report Email); now the backend
-  // does all of that itself in one endpoint, so this no longer depends on
-  // any n8n instance (cloud quota or local Docker uptime) being available.
   async function handleEmailReport() {
     const recipientEmail = session?.user?.email;
     if (!recipientEmail) return;
@@ -518,10 +565,15 @@ export default function MissionControl() {
     setEmailingReport(true);
     setEmailReportMessage(null);
     try {
+      const activeTelemetry = {
+        ...telemetry,
+        depth: diveLogSample?.depth_m !== undefined ? `${diveLogSample.depth_m.toFixed(1)} m` : telemetry.depth,
+        temp: diveLogSample?.temp_c !== undefined ? `${diveLogSample.temp_c.toFixed(1)} °C` : telemetry.temp,
+      };
       const response = await fetch(`${API_BASE_URL}/send-mission-report-email`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...telemetry, recipient_email: recipientEmail }),
+        body: JSON.stringify({ ...activeTelemetry, recipient_email: recipientEmail }),
       });
       if (!response.ok) throw new Error(`Email report failed: ${response.status}`);
 
@@ -708,9 +760,6 @@ export default function MissionControl() {
             </button>
           </form>
 
-          {/* Live search feedback — result count, empty state, or error.
-              Previously a search gave no visible confirmation at all,
-              even a fully successful one. */}
           {speciesSearchStatus !== "idle" && (
             <div className="pointer-events-none bg-[#1c2226]/90 border border-[#3a444a] rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest">
               {speciesSearchStatus === "loading" && (
@@ -750,20 +799,28 @@ export default function MissionControl() {
           </button>
         </div>
         <div className="px-3 sm:px-4 py-2 sm:py-2.5">
-          <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">Coordinates · measured</p>
-          <p className="text-sm">{telemetry.coords}</p>
+          <p className={`text-[10px] uppercase tracking-widest ${telemetry.coordsSource === "live" ? "text-[#8fa3ad]" : "text-[#a48a55]"}`}>
+            Coordinates · {telemetry.coordsSource === "live" ? "measured" : "simulated"}
+          </p>
+          <p className={`text-sm ${telemetry.coordsSource !== "live" ? "border-b border-dashed border-[#a48a55] inline-block" : ""}`}>
+            {telemetry.coords}
+          </p>
         </div>
         <div className="px-3 sm:px-4 py-2 sm:py-2.5">
-          <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad]">
-            Temp · {telemetry.tempSource === "live" ? "measured" : "—"}
+          <p className={`text-[10px] uppercase tracking-widest ${diveLogSample?.temp_c !== undefined || telemetry.tempSource === "live" ? "text-[#8fa3ad]" : "text-[#a48a55]"}`}>
+            Temp · {diveLogSample?.temp_c !== undefined ? "measured (dive log)" : telemetry.tempSource === "live" ? "measured" : "—"}
           </p>
-          <p className="text-lg font-bold">{telemetry.temp}</p>
+          <p className="text-lg font-bold">
+            {diveLogSample?.temp_c !== undefined ? `${diveLogSample.temp_c.toFixed(1)} °C` : telemetry.temp}
+          </p>
         </div>
         <div className="px-3 sm:px-4 py-2 sm:py-2.5">
-          <p className={`text-[10px] uppercase tracking-widest ${telemetry.depthSource === "live" ? "text-[#8fa3ad]" : "text-[#a48a55]"}`}>
-            Depth · {telemetry.depthSource === "live" ? "measured" : "simulated"}
+          <p className={`text-[10px] uppercase tracking-widest ${diveLogSample?.depth_m !== undefined || telemetry.depthSource === "live" ? "text-[#8fa3ad]" : "text-[#a48a55]"}`}>
+            Depth · {diveLogSample?.depth_m !== undefined ? "measured (dive log)" : telemetry.depthSource === "live" ? "measured" : "simulated"}
           </p>
-          <p className="text-lg font-bold">{telemetry.depth}</p>
+          <p className="text-lg font-bold">
+            {diveLogSample?.depth_m !== undefined ? `${diveLogSample.depth_m.toFixed(1)} m` : telemetry.depth}
+          </p>
         </div>
         <div className="px-3 sm:px-4 py-2 sm:py-2.5">
           <p className="text-[10px] uppercase tracking-widest text-[#a48a55]">Salinity · simulated</p>
@@ -870,7 +927,6 @@ export default function MissionControl() {
         )}
       </div>
 
-      {/* Mobile-only fallback: shows the toast even when the actions drawer is closed */}
       {activeToast && !actionsOpen && (
         <div className="sm:hidden absolute bottom-16 left-1/2 -translate-x-1/2 pointer-events-auto z-30 max-w-[90vw]">
           <div
@@ -920,6 +976,29 @@ export default function MissionControl() {
             >
               Upload video
             </button>
+            <input
+              ref={diveLogInputRef}
+              type="file"
+              accept=".uddf,.xml"
+              className="hidden"
+              onChange={handleDiveLogSelected}
+            />
+            <button
+              onClick={() => diveLogInputRef.current?.click()}
+              className="border rounded-lg px-2 sm:px-3 py-1 sm:py-1.5 text-[9px] sm:text-[10px] uppercase tracking-widest whitespace-nowrap bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
+            >
+              Attach dive log
+            </button>
+            {diveLogId && (
+              <span className="text-[9px] text-[#7de88f]">
+                Dive log attached — {diveLogSampleCount} real samples
+              </span>
+            )}
+            {videoGpsInfo && (
+              <span className="text-[9px] text-[#7de88f]">
+                {videoGpsInfo}
+              </span>
+            )}
             <button
               onClick={handleUseWebcam}
               className={`border rounded-lg px-2 sm:px-3 py-1 sm:py-1.5 text-[9px] sm:text-[10px] uppercase tracking-widest whitespace-nowrap ${

@@ -1,5 +1,5 @@
 import io
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
 from reportlab.lib import colors
@@ -87,6 +87,26 @@ def _health_index(avg_bleaching_ratio):
     return round((1 - avg_bleaching_ratio) * 100, 1)
 
 
+def _compute_maxn(species_entries):
+    """MaxN — the max number of individuals of a species visible in any
+    single analyzed frame across the session. This is the standard fish-
+    abundance metric in baited/remote underwater video (BRUV) survey
+    literature (Ellis & DeMartini 1995 onward), not something invented
+    for this report — it's deliberately conservative and avoids the
+    massive overcount you get from summing every detection (one fish
+    sitting in frame across 20 analyzed frames isn't 20 fish).
+    """
+    per_frame_counts = defaultdict(lambda: defaultdict(int))
+    for entry in species_entries:
+        per_frame_counts[entry["timestamp"]][entry["label"]] += 1
+
+    maxn = defaultdict(int)
+    for frame_counts in per_frame_counts.values():
+        for label, count in frame_counts.items():
+            maxn[label] = max(maxn[label], count)
+    return maxn, len(per_frame_counts)
+
+
 def generate_mission_report(telemetry: dict) -> bytes:
     """Builds a PDF summarizing species detected, counts, and ecosystem
     health index from the session's detection_log, plus the mission
@@ -95,7 +115,7 @@ def generate_mission_report(telemetry: dict) -> bytes:
     species_entries = [d for d in all_entries if d["source"] != "coral_bleach"]
     bleach_entries = [d for d in all_entries if d["source"] == "coral_bleach"]
 
-    species_counts = Counter(d["label"] for d in species_entries)
+    maxn, frames_sampled = _compute_maxn(species_entries)
     avg_bleaching = (
         sum(d["confidence"] for d in bleach_entries) / len(bleach_entries)
         if bleach_entries
@@ -190,9 +210,22 @@ def generate_mission_report(telemetry: dict) -> bytes:
         )
 
     story.append(Paragraph("Species Detected", heading_style))
-    if species_counts:
-        rows = [["Species / Class", "Detection Count"]]
-        for label, count in species_counts.most_common():
+    story.append(
+        Paragraph(
+            f"MaxN — the maximum number of individuals of each species observed "
+            f"simultaneously in any single analyzed frame, across {frames_sampled} "
+            f"frames sampled this session. This is the standard relative-abundance "
+            f"metric used in underwater video survey research, not a raw detection "
+            f"count (which would overcount a single animal that stays in frame "
+            f"across many consecutive analyzed frames).",
+            label_style,
+        )
+    )
+    story.append(Spacer(1, 6))
+
+    if maxn:
+        rows = [["Species / Class", "MaxN"]]
+        for label, count in sorted(maxn.items(), key=lambda x: -x[1]):
             rows.append([label, str(count)])
         species_table = Table(rows, colWidths=[4 * inch, 1.5 * inch])
         species_table.setStyle(
