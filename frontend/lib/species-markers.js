@@ -1,11 +1,58 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
 
+/** Same paint config as the initial layer setup in bathymetry-map.js —
+ * duplicated here (not imported) so this file can defensively re-create
+ * the source/layer if they're ever missing, without needing a reference
+ * back to bathymetry-map.js's init function. */
+function ensureRiskLayer(map) {
+  if (!map.getSource("risk-points")) {
+    console.warn(
+      "[species-markers] 'risk-points' source was missing — re-creating it. " +
+      "This means the map's style reloaded/reset at some point after initial " +
+      "load, silently dropping the runtime-added source/layer (a known " +
+      "MapLibre behavior) — previous searches likely rendered zero visible " +
+      "markers as a result, with no error anywhere, because the old code " +
+      "just silently skipped setData() when the source didn't exist."
+    );
+    map.addSource("risk-points", {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] },
+    });
+  }
+
+  if (!map.getLayer("risk-markers")) {
+    map.addLayer({
+      id: "risk-markers",
+      type: "circle",
+      source: "risk-points",
+      paint: {
+        "circle-radius": [
+          "interpolate",
+          ["linear"],
+          ["zoom"],
+          2, 3,
+          6, 6,
+          10, 9,
+          14, 12,
+        ],
+        "circle-color": "#ff5470",
+        "circle-blur": 0.15,
+        "circle-opacity": 0.95,
+        "circle-stroke-width": 1.5,
+        "circle-stroke-color": "#1c2226",
+        "circle-stroke-opacity": 0.9,
+      },
+    });
+  }
+}
+
 /**
  * Fetches species occurrence data (OBIS, cache-first via /species-data)
- * for a scientific name and loads it into the map's existing
- * "risk-points" GeoJSON source. Auto-fits the camera to frame every
- * matching sighting — previously a successful search could leave every
- * pin sitting off-screen with zero indication anything loaded.
+ * for a scientific name and loads it into the map's "risk-points"
+ * GeoJSON source — creating that source/layer first if they're missing
+ * (see ensureRiskLayer above) rather than silently doing nothing, which
+ * is what let a fully successful 200-result search render zero visible
+ * markers with no error anywhere in the console.
  *
  * Returns a small status object so the caller (the search UI in page.js)
  * can show real feedback — result count, "not found", or an error —
@@ -36,10 +83,12 @@ export async function loadSpeciesMarkers(map, scientificName) {
     const geojson = await response.json();
     const features = geojson?.features || [];
 
+    ensureRiskLayer(map);
     const source = map.getSource("risk-points");
-    if (source) {
-      source.setData(geojson);
-    }
+    source.setData(geojson);
+    console.debug(
+      `[species-markers] "${scientificName}": pushed ${features.length} features into risk-points source`
+    );
 
     attachPopupHandler(map);
 
@@ -59,16 +108,13 @@ export async function loadSpeciesMarkers(map, scientificName) {
  * stale results from a previous species don't linger and look like
  * matches for the current search. */
 export function clearMarkers(map) {
-  const source = map?.getSource("risk-points");
+  if (!map) return;
+  const source = map.getSource("risk-points");
   if (source) {
     source.setData({ type: "FeatureCollection", features: [] });
   }
 }
 
-/** Zooms/pans the camera to frame every result, with padding so pins
- * near the edge aren't clipped by the side panels. A single result still
- * gets a sensible close-in zoom rather than fitBounds collapsing to a
- * single point at max zoom. */
 /** Zooms/pans the camera to frame the main cluster of results, with
  * padding so pins near the edge aren't clipped by the side panels.
  *

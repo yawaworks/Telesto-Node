@@ -114,5 +114,13 @@ export function initBathymetryMap(container) {
     });
   });
 
+  // Exposed for direct console debugging (window.__telestoMap). Lets you
+  // inspect the actual live GeoJSON source data from devtools — e.g.
+  // window.__telestoMap.getSource('risk-points')._data.features.length —
+  // rather than inferring what happened purely from screenshots.
+  if (typeof window !== "undefined") {
+    window.__telestoMap = map;
+  }
+
   return map;
 }
