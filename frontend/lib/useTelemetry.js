@@ -31,6 +31,7 @@ export function useTelemetry() {
     temp: "17.2°C",
     salinity: "34.9 PSU",
     heading: "086°",
+    depthSource: "simulated",
   });
   const [connected, setConnected] = useState(false);
   const wsRef = useRef(null);
@@ -59,6 +60,7 @@ export function useTelemetry() {
             salinity: `${data.salinity.toFixed(1)} PSU`,
             heading: `${String(Math.round(data.heading)).padStart(3, "0")}°`,
             tempSource: data.temp_source || "simulated",
+            depthSource: data.depth_source || "simulated",
           });
         } catch (err) {
           console.error("Telemetry parse error:", err);

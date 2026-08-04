@@ -62,6 +62,11 @@ export default function MissionControl() {
   }, [telemetry]);
 
   const [speciesQuery, setSpeciesQuery] = useState(DEFAULT_SPECIES);
+  // Real, operator-derived heading — updated directly by actual gamepad
+  // steering input (see gamepad-controller.js), not synthetic server-side
+  // drift. Starts null so the UI can fall back to the backend's simulated
+  // heading until the operator actually steers for the first time.
+  const [operatorHeading, setOperatorHeading] = useState(null);
   // Feedback for the live species search — "idle" | "loading" | "success"
   // | "empty" | "error". Previously a search gave zero visible feedback:
   // it could succeed, fail, or find nothing, and the map would just sit
@@ -138,6 +143,7 @@ export default function MissionControl() {
       videoElement: videoRef.current,
       map,
       onSnapshot: () => handleDiscoverySnapshotRef.current(),
+      onHeadingUpdate: setOperatorHeading,
     });
 
     if (map) {
@@ -754,7 +760,9 @@ export default function MissionControl() {
           <p className="text-lg font-bold">{telemetry.temp}</p>
         </div>
         <div className="px-3 sm:px-4 py-2 sm:py-2.5">
-          <p className="text-[10px] uppercase tracking-widest text-[#a48a55]">Depth · simulated</p>
+          <p className={`text-[10px] uppercase tracking-widest ${telemetry.depthSource === "live" ? "text-[#8fa3ad]" : "text-[#a48a55]"}`}>
+            Depth · {telemetry.depthSource === "live" ? "measured" : "simulated"}
+          </p>
           <p className="text-lg font-bold">{telemetry.depth}</p>
         </div>
         <div className="px-3 sm:px-4 py-2 sm:py-2.5">
@@ -762,8 +770,14 @@ export default function MissionControl() {
           <p className="text-sm border-b border-dashed border-[#a48a55] inline-block">{telemetry.salinity}</p>
         </div>
         <div className="px-3 sm:px-4 py-2 sm:py-2.5">
-          <p className="text-[10px] uppercase tracking-widest text-[#a48a55]">Heading · simulated</p>
-          <p className="text-sm border-b border-dashed border-[#a48a55] inline-block">{telemetry.heading}</p>
+          <p className={`text-[10px] uppercase tracking-widest ${operatorHeading !== null ? "text-[#7de88f]" : "text-[#a48a55]"}`}>
+            Heading · {operatorHeading !== null ? "operator" : "simulated"}
+          </p>
+          <p className={`text-sm inline-block ${operatorHeading === null ? "border-b border-dashed border-[#a48a55]" : ""}`}>
+            {operatorHeading !== null
+              ? `${String(Math.round(operatorHeading)).padStart(3, "0")}°`
+              : telemetry.heading}
+          </p>
         </div>
         {!isMapMode && coralBleachingRatio !== null && (
           <div className="px-3 sm:px-4 py-2 sm:py-2.5">
