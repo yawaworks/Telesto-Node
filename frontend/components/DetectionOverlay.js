@@ -81,7 +81,7 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [], onV
 
   const [isHoveringBox, setIsHoveringBox] = useState(false); // cursor affordance only
   const [selectedBox, setSelectedBox] = useState(null); // { label, ghost, videoTime } | null
-  const [imageTab, setImageTab] = useState("photos"); // "photos" | "diagrams"
+  const [imageTab, setImageTab] = useState("insitu"); // "insitu" | "morphological" | "anatomical" | "histological" | "ultrastructural"
   const [activeImageIndex, setActiveImageIndex] = useState(0);
   const [captureDataUrl, setCaptureDataUrl] = useState(null);
   const [speciesData, setSpeciesData] = useState(null);
@@ -370,7 +370,7 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [], onV
 
     const video = videoRef.current;
     setCaptureDataUrl(null);
-    setImageTab("photos");
+    setImageTab("insitu");
     setActiveImageIndex(0);
     setSelectedBox({
       label: hit.label,
@@ -403,7 +403,7 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [], onV
     setCaptureDataUrl(null);
     setSpeciesData(null);
     setFetchError(null);
-    setImageTab("photos");
+    setImageTab("insitu");
     setActiveImageIndex(0);
     if (abortRef.current) abortRef.current.abort();
     videoRef.current?.play().catch(() => {});
@@ -506,168 +506,171 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [], onV
                     </button>
                   )}
 
-                  {/* Anatomical/Internal (Category 3) — a real link to
-                      MorphoSource's own search, not an in-app gallery.
-                      MorphoSource's public API couldn't be verified from
-                      this environment (see morphosource_client.py), so
-                      this links out rather than pretending to embed CT
-                      scans we haven't confirmed exist or load correctly.
-                      Coverage is genuinely thin for coral/invertebrates —
-                      MorphoSource grew out of a vertebrate-focused
-                      project — the link still works, it may just come
-                      back empty for those species. */}
-                  {speciesData.anatomical_search_url && (
-                    <a
-                      href={speciesData.anatomical_search_url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="block w-full text-center bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-2 text-[10px] uppercase tracking-widest text-[#b7c4cc] hover:bg-white/[0.08]"
-                    >
-                      Search MorphoSource for CT/anatomical scans ↗
-                    </a>
-                  )}
+                  {/* Reference imagery, organized as five tabs matching
+                      how a marine biologist actually categorizes imaging
+                      data (In Situ / Morphological / Anatomical /
+                      Histological / Ultrastructural), instead of a
+                      Photos/Diagrams gallery plus a separately-floating
+                      MorphoSource link button. Only tabs with real content
+                      are shown.
 
-                  {/* Photos / Diagrams tabs — real multi-source galleries
-                      (Wikipedia + iNaturalist for photos, Wikipedia's SVG
-                      technical images for diagrams) instead of a single
-                      possibly-unrepresentative generic image. Only tabs
-                      with actual content are shown. */}
-                  {(speciesData.photos?.length > 0 || speciesData.diagrams?.length > 0) && (
-                    <div className="pt-1.5 border-t border-[#3a444a]">
-                      <div className="flex gap-1 mb-2">
-                        {speciesData.photos?.length > 0 && (
-                          <button
-                            onClick={() => {
-                              setImageTab("photos");
-                              setActiveImageIndex(0);
-                            }}
-                            className={`px-2.5 py-1 rounded text-[10px] uppercase tracking-widest border ${
-                              imageTab === "photos"
-                                ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
-                                : "bg-white/[0.04] border-[#3a444a] text-[#8fa3ad] hover:bg-white/[0.08]"
-                            }`}
-                          >
-                            Photos ({speciesData.photos.length})
-                          </button>
+                      Honest limitation, not a design choice: no free API
+                      provides embeddable anatomical/histological/
+                      ultrastructural IMAGES for arbitrary species —
+                      MorphoSource has no public search API to pull
+                      results from, and Europe PMC returns papers, not
+                      extracted figures. The Anatomical/Histological/
+                      Ultrastructural tabs are real, but their content is
+                      links to the actual source material, not embedded
+                      images — fabricating an inline gallery here would
+                      mean either faking images or silently failing when
+                      they don't load. A link a researcher can actually
+                      open and trust is more useful than a broken or
+                      invented one. */}
+                  {(() => {
+                    const tabs = [
+                      { id: "insitu", label: "In Situ", count: speciesData.photos?.length || 0 },
+                      { id: "morphological", label: "Morphological", count: speciesData.diagrams?.length || 0 },
+                      { id: "anatomical", label: "Anatomical", count: speciesData.anatomical_search_url ? 1 : 0 },
+                      { id: "histological", label: "Histological", count: speciesData.histological_literature?.length || 0 },
+                      { id: "ultrastructural", label: "Ultrastructural", count: speciesData.ultrastructural_literature?.length || 0 },
+                    ].filter((t) => t.count > 0);
+
+                    if (tabs.length === 0) return null;
+
+                    // Falls back to the first available tab if the
+                    // current selection has no content for this species
+                    // (e.g. it defaulted to "insitu" but this species only
+                    // has Histological matches) — avoids landing on a
+                    // blank tab.
+                    const activeTabId = tabs.some((t) => t.id === imageTab) ? imageTab : tabs[0].id;
+
+                    return (
+                      <div className="pt-1.5 border-t border-[#3a444a]">
+                        <div className="flex gap-1 mb-2 flex-wrap">
+                          {tabs.map((tab) => (
+                            <button
+                              key={tab.id}
+                              onClick={() => {
+                                setImageTab(tab.id);
+                                setActiveImageIndex(0);
+                              }}
+                              className={`px-2.5 py-1 rounded text-[10px] uppercase tracking-widest border ${
+                                activeTabId === tab.id
+                                  ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
+                                  : "bg-white/[0.04] border-[#3a444a] text-[#8fa3ad] hover:bg-white/[0.08]"
+                              }`}
+                            >
+                              {tab.label}
+                              {tab.id !== "anatomical" ? ` (${tab.count})` : ""}
+                            </button>
+                          ))}
+                        </div>
+
+                        {(activeTabId === "insitu" || activeTabId === "morphological") && (() => {
+                          const gallery = activeTabId === "morphological" ? speciesData.diagrams : speciesData.photos;
+                          if (!gallery?.length) return null;
+                          const active = gallery[Math.min(activeImageIndex, gallery.length - 1)];
+                          return (
+                            <>
+                              <img
+                                src={active.url}
+                                alt={`${activeTabId === "morphological" ? "Reference" : "In situ"} image of ${speciesData.scientific_name || selectedBox.label}`}
+                                className={`w-full rounded-md border border-[#3a444a] ${
+                                  activeTabId === "morphological"
+                                    ? "max-h-48 object-contain bg-[#0c1113]"
+                                    : "h-40 object-cover"
+                                }`}
+                              />
+                              <p className="text-[#5a6a72] mt-1">{active.attribution}</p>
+
+                              {gallery.length > 1 && (
+                                <div className="flex gap-1.5 mt-2 overflow-x-auto pb-1">
+                                  {gallery.map((img, i) => (
+                                    <button
+                                      key={i}
+                                      onClick={() => setActiveImageIndex(i)}
+                                      className={`shrink-0 w-12 h-12 rounded overflow-hidden border-2 ${
+                                        i === activeImageIndex ? "border-[#8fa3ad]" : "border-transparent opacity-60 hover:opacity-100"
+                                      }`}
+                                    >
+                                      <img src={img.url} alt="" className="w-full h-full object-cover" />
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
+
+                        {activeTabId === "anatomical" && speciesData.anatomical_search_url && (
+                          <div className="flex flex-col gap-2">
+                            <p className="text-[#5a6a72]">
+                              CT scans, radiographs, and dissection imagery — searched on MorphoSource directly, since there's no API to pull results into this view. Coverage is genuinely thin for coral and invertebrates; MorphoSource grew out of a vertebrate-focused project.
+                            </p>
+                            <a
+                              href={speciesData.anatomical_search_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="block w-full text-center bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-2 text-[10px] uppercase tracking-widest text-[#b7c4cc] hover:bg-white/[0.08]"
+                            >
+                              Search MorphoSource for CT/anatomical scans ↗
+                            </a>
+                          </div>
                         )}
-                        {speciesData.diagrams?.length > 0 && (
-                          <button
-                            onClick={() => {
-                              setImageTab("diagrams");
-                              setActiveImageIndex(0);
-                            }}
-                            className={`px-2.5 py-1 rounded text-[10px] uppercase tracking-widest border ${
-                              imageTab === "diagrams"
-                                ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
-                                : "bg-white/[0.04] border-[#3a444a] text-[#8fa3ad] hover:bg-white/[0.08]"
-                            }`}
-                          >
-                            Diagrams ({speciesData.diagrams.length})
-                          </button>
+
+                        {activeTabId === "histological" && speciesData.histological_literature?.length > 0 && (
+                          <div className="flex flex-col gap-2">
+                            <p className="text-[#5a6a72]">
+                              Open-access papers whose title/abstract match tissue/cellular imaging terms — the actual figures are on the paper itself, not extracted here.
+                            </p>
+                            <ul className="space-y-2">
+                              {speciesData.histological_literature.map((paper, i) => (
+                                <li key={i}>
+                                  <a
+                                    href={paper.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-[#b7c4cc] hover:text-[#d3dbe0] underline"
+                                  >
+                                    {paper.title}
+                                  </a>
+                                  <p className="text-[#5a6a72]">
+                                    {[paper.authors, paper.journal, paper.year].filter(Boolean).join(" · ")}
+                                  </p>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+
+                        {activeTabId === "ultrastructural" && speciesData.ultrastructural_literature?.length > 0 && (
+                          <div className="flex flex-col gap-2">
+                            <p className="text-[#5a6a72]">
+                              Open-access papers whose title/abstract match electron-microscopy (SEM/TEM) terms — the actual figures are on the paper itself, not extracted here.
+                            </p>
+                            <ul className="space-y-2">
+                              {speciesData.ultrastructural_literature.map((paper, i) => (
+                                <li key={i}>
+                                  <a
+                                    href={paper.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="text-[#b7c4cc] hover:text-[#d3dbe0] underline"
+                                  >
+                                    {paper.title}
+                                  </a>
+                                  <p className="text-[#5a6a72]">
+                                    {[paper.authors, paper.journal, paper.year].filter(Boolean).join(" · ")}
+                                  </p>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
                         )}
                       </div>
-
-                      {(() => {
-                        const gallery = imageTab === "diagrams" ? speciesData.diagrams : speciesData.photos;
-                        if (!gallery?.length) return null;
-                        const active = gallery[Math.min(activeImageIndex, gallery.length - 1)];
-                        return (
-                          <>
-                            <img
-                              src={active.url}
-                              alt={`${imageTab === "diagrams" ? "Diagram" : "Photo"} of ${speciesData.scientific_name || selectedBox.label}`}
-                              className={`w-full rounded-md border border-[#3a444a] ${
-                                imageTab === "diagrams"
-                                  ? "max-h-48 object-contain bg-[#0c1113]"
-                                  : "h-40 object-cover"
-                              }`}
-                            />
-                            <p className="text-[#5a6a72] mt-1">{active.attribution}</p>
-
-                            {gallery.length > 1 && (
-                              <div className="flex gap-1.5 mt-2 overflow-x-auto pb-1">
-                                {gallery.map((img, i) => (
-                                  <button
-                                    key={i}
-                                    onClick={() => setActiveImageIndex(i)}
-                                    className={`shrink-0 w-12 h-12 rounded overflow-hidden border-2 ${
-                                      i === activeImageIndex ? "border-[#8fa3ad]" : "border-transparent opacity-60 hover:opacity-100"
-                                    }`}
-                                  >
-                                    <img src={img.url} alt="" className="w-full h-full object-cover" />
-                                  </button>
-                                ))}
-                              </div>
-                            )}
-                          </>
-                        );
-                      })()}
-                    </div>
-                  )}
-
-                  {/* Histological/Cellular (Category 4) and Ultrastructural
-                      (Category 5) — real Europe PMC open-access literature
-                      whose title/abstract match the imaging modality, NOT
-                      extracted figure images (see europepmc_client.py for
-                      why that distinction matters). Only shown when
-                      something actually matched — most species will have
-                      nothing here, and that's the honest result, not a
-                      bug. */}
-                  {speciesData.histological_literature?.length > 0 && (
-                    <div className="pt-1.5 border-t border-[#3a444a]">
-                      <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad] mb-1.5">
-                        Histological literature
-                      </p>
-                      <p className="text-[#5a6a72] mb-1.5">
-                        Open-access papers likely containing tissue/cellular imagery — view the actual figures on the paper itself.
-                      </p>
-                      <ul className="space-y-2">
-                        {speciesData.histological_literature.map((paper, i) => (
-                          <li key={i}>
-                            <a
-                              href={paper.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-[#b7c4cc] hover:text-[#d3dbe0] underline"
-                            >
-                              {paper.title}
-                            </a>
-                            <p className="text-[#5a6a72]">
-                              {[paper.authors, paper.journal, paper.year].filter(Boolean).join(" · ")}
-                            </p>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-
-                  {speciesData.ultrastructural_literature?.length > 0 && (
-                    <div className="pt-1.5 border-t border-[#3a444a]">
-                      <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad] mb-1.5">
-                        Ultrastructural literature (SEM/TEM)
-                      </p>
-                      <p className="text-[#5a6a72] mb-1.5">
-                        Open-access papers likely containing electron-microscopy imagery — view the actual figures on the paper itself.
-                      </p>
-                      <ul className="space-y-2">
-                        {speciesData.ultrastructural_literature.map((paper, i) => (
-                          <li key={i}>
-                            <a
-                              href={paper.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="text-[#b7c4cc] hover:text-[#d3dbe0] underline"
-                            >
-                              {paper.title}
-                            </a>
-                            <p className="text-[#5a6a72]">
-                              {[paper.authors, paper.journal, paper.year].filter(Boolean).join(" · ")}
-                            </p>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
+                    );
+                  })()}
 
                   {/* Research papers — real OpenAlex results from
                       species_info.py, not a placeholder search link. */}
