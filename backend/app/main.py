@@ -45,6 +45,15 @@ from app.report_email import send_mission_report_email
 from app.species_info import get_species_info
 from app.telemetry import TelemetrySimulator, MISSION_LAT, MISSION_LNG
 from app.weight_estimate import estimate_weight_grams, fishbase_search_url
+from app.bioacoustics import (
+    SAMPLE_RATE,
+    WINDOW_SECONDS,
+    embed_windows,
+    embedding_from_list,
+    embedding_to_list,
+    find_similar_windows,
+    load_waveform,
+)
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -1877,4 +1886,204 @@ async def download_meeting_ics(request: Request, meeting_id: str, requester_emai
         content=ics_body,
         media_type="text/calendar",
         headers={"Content-Disposition": f'attachment; filename="{meeting_doc.get("title", "meeting")}.ics"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Bioacoustic analysis — SurfPerch-based similarity search, not species
+# classification. See app/bioacoustics.py for the full rationale and the
+# real free-tier risks (untested against Render's 512MB free instance,
+# in particular). A researcher uploads a short reference clip of a known
+# sound, then can search a longer recording for acoustically similar
+# moments. Every result carries an explicit "similarity, not
+# identification" caveat.
+# ---------------------------------------------------------------------------
+
+MAX_ACOUSTIC_UPLOAD_BYTES = 20 * 1024 * 1024  # 20MB
+MAX_ACOUSTIC_AUDIO_SECONDS = 180  # 3 minutes — keeps live CPU inference within a single request
+
+
+class AcousticReferenceResponse(BaseModel):
+    id: str
+    channel_id: str
+    label: str
+    created_by: str
+    created_at: str
+
+
+class AcousticMatch(BaseModel):
+    start_seconds: float
+    score: float
+
+
+class AcousticAnalysisResponse(BaseModel):
+    reference_label: str
+    threshold: float
+    matches: List[AcousticMatch]
+    windows_analyzed: int
+    warning: str
+
+
+@app.post("/channels/{channel_id}/acoustic-references", response_model=AcousticReferenceResponse)
+@limiter.limit("10/minute")
+async def create_acoustic_reference(
+    request: Request,
+    channel_id: str,
+    file: UploadFile = File(...),
+    label: str = Form(...),
+    created_by: str = Form(...),
+):
+    """Uploads a short reference clip of a known call/sound (a few
+    seconds is enough) and stores its SurfPerch embedding, so later
+    recordings can be searched for acoustically similar moments."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    _, channel_doc = _require_channel(db, channel_id)
+    if created_by not in channel_doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can add a reference sound")
+
+    raw_bytes = await file.read()
+    try:
+        waveform = load_waveform(raw_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    try:
+        windows = embed_windows(waveform)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Embedding failed: {exc}")
+    if not windows:
+        raise HTTPException(status_code=400, detail="That clip was too short to embed")
+
+    # Average across windows so a multi-call reference clip still yields
+    # one representative embedding.
+    reference_embedding = np.mean([w[1] for w in windows], axis=0)
+
+    record = {
+        "channel_id": ObjectId(channel_id),
+        "label": label,
+        "embedding": embedding_to_list(reference_embedding),
+        "created_by": created_by,
+        "created_at": datetime.now(timezone.utc),
+    }
+    result = db["acoustic_references"].insert_one(record)
+    return AcousticReferenceResponse(
+        id=str(result.inserted_id),
+        channel_id=channel_id,
+        label=label,
+        created_by=created_by,
+        created_at=record["created_at"].isoformat(),
+    )
+
+
+@app.get("/channels/{channel_id}/acoustic-references", response_model=List[AcousticReferenceResponse])
+@limiter.limit("30/minute")
+async def list_acoustic_references(request: Request, channel_id: str, requester_email: str):
+    db = get_db()
+    if db is None:
+        return []
+
+    _, channel_doc = _require_channel(db, channel_id)
+    if requester_email not in channel_doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can view reference sounds")
+
+    docs = db["acoustic_references"].find({"channel_id": ObjectId(channel_id)}).sort("created_at", -1)
+    return [
+        AcousticReferenceResponse(
+            id=str(d["_id"]),
+            channel_id=channel_id,
+            label=d.get("label", ""),
+            created_by=d.get("created_by", ""),
+            created_at=d["created_at"].isoformat() if d.get("created_at") else "",
+        )
+        for d in docs
+    ]
+
+
+@app.delete("/acoustic-references/{reference_id}")
+@limiter.limit("20/minute")
+async def delete_acoustic_reference(request: Request, reference_id: str, requested_by: str):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    try:
+        r_oid = ObjectId(reference_id)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid reference id")
+    ref_doc = db["acoustic_references"].find_one({"_id": r_oid})
+    if ref_doc is None:
+        raise HTTPException(status_code=404, detail="Reference sound not found")
+
+    _, channel_doc = _require_channel(db, str(ref_doc["channel_id"]))
+    if requested_by != ref_doc.get("created_by") and not _is_admin(channel_doc, requested_by):
+        raise HTTPException(status_code=403, detail="Only the uploader or a channel admin can delete this")
+
+    db["acoustic_references"].delete_one({"_id": r_oid})
+    return {"deleted": True}
+
+
+@app.post("/channels/{channel_id}/acoustic-analysis", response_model=AcousticAnalysisResponse)
+@limiter.limit("5/minute")
+async def analyze_acoustic_clip(
+    request: Request,
+    channel_id: str,
+    file: UploadFile = File(...),
+    reference_id: str = Form(...),
+    requester_email: str = Form(...),
+    threshold: float = Form(0.6),
+):
+    """Synchronous by design for this first pass — CPU inference on a
+    free Render instance is slow, so this deliberately caps duration
+    rather than queuing background jobs, to keep the request from timing
+    out. If clips longer than 3 minutes turn out to be the common case,
+    this needs a real background job queue, not a bigger timeout."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    _, channel_doc = _require_channel(db, channel_id)
+    if requester_email not in channel_doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can run acoustic analysis")
+
+    try:
+        ref_oid = ObjectId(reference_id)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid reference id")
+    ref_doc = db["acoustic_references"].find_one({"_id": ref_oid, "channel_id": ObjectId(channel_id)})
+    if ref_doc is None:
+        raise HTTPException(status_code=404, detail="Reference sound not found in this channel")
+
+    raw_bytes = await file.read()
+    if len(raw_bytes) > MAX_ACOUSTIC_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Clip is too large for live analysis — keep it under 20MB")
+
+    try:
+        waveform = load_waveform(raw_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    duration_seconds = len(waveform) / SAMPLE_RATE
+    if duration_seconds > MAX_ACOUSTIC_AUDIO_SECONDS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Clips over {MAX_ACOUSTIC_AUDIO_SECONDS}s aren't analyzed live on the free tier — trim it first",
+        )
+
+    reference_embedding = embedding_from_list(ref_doc["embedding"])
+    try:
+        matches = find_similar_windows(waveform, reference_embedding, threshold=threshold)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Analysis failed: {exc}")
+
+    windows_analyzed = max(1, int(np.ceil(len(waveform) / (SAMPLE_RATE * WINDOW_SECONDS))))
+
+    return AcousticAnalysisResponse(
+        reference_label=ref_doc.get("label", ""),
+        threshold=threshold,
+        matches=[AcousticMatch(**m) for m in matches],
+        windows_analyzed=windows_analyzed,
+        warning="Similarity search only, not a calibrated species classifier — verify matches by ear before citing them.",
     )
