@@ -3,11 +3,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSession } from "next-auth/react";
 import { useRouter } from "next/navigation";
-import Link from "next/link";
 
 import ChannelSidebar from "../../components/ChannelSidebar";
 import ChatPanel from "../../components/ChatPanel";
 import CreateChannelModal from "../../components/CreateChannelModal";
+import MissionControl from "../../components/MissionControl";
 import { createChannel, listChannels } from "../../lib/workspaceApi";
 import { useHeartbeat, usePresence } from "../../lib/usePresence";
 
@@ -135,22 +135,7 @@ export default function WorkspacePage() {
                 <ChatPanel channelId={activeChannel.id} currentEmail={email} />
               )}
 
-              {activeTab === "mission" && (
-                <div className="h-full flex flex-col items-center justify-center gap-4 px-6 text-center">
-                  <p className="text-sm text-[#b7c4cc] max-w-md">
-                    Mission Control still lives on its own page for now — embedding it as a
-                    literal in-channel tab is a larger, separate change to{" "}
-                    <code className="text-[#8fa3ad]">app/page.js</code> that's worth doing
-                    deliberately rather than folded into this pass.
-                  </p>
-                  <Link
-                    href="/"
-                    className="bg-[#8fa3ad]/10 border border-[#8fa3ad]/60 rounded-lg px-4 py-2 text-xs uppercase tracking-widest text-[#d3dbe0] hover:bg-[#8fa3ad]/20 transition"
-                  >
-                    Open Mission Control
-                  </Link>
-                </div>
-              )}
+              {activeTab === "mission" && <MissionControl embedded />}
 
               {activeTab === "files" && (
                 <div className="h-full flex items-center justify-center px-6 text-center">
