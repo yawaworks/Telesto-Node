@@ -1,10 +1,16 @@
 import Script from "next/script";
 import "./globals.css";
 import Providers from "./providers";
+import ServiceWorkerRegister from "../components/ServiceWorkerRegister";
 
 export const metadata = {
   title: "Telesto Node — Mission Control",
   description: "Real-Time Marine Ecosystem Monitoring & Health Analytics",
+  manifest: "/manifest.json",
+};
+
+export const viewport = {
+  themeColor: "#171d20",
 };
 
 export default function RootLayout({ children }) {
@@ -30,6 +36,7 @@ export default function RootLayout({ children }) {
           src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
           strategy="afterInteractive"
         />
+        <ServiceWorkerRegister />
         <Providers>{children}</Providers>
       </body>
     </html>

@@ -1,44 +1,31 @@
-import Script from "next/script";
-import "./globals.css";
-import Providers from "./providers";
-import ServiceWorkerRegister from "../components/ServiceWorkerRegister";
+"use client";
 
-export const metadata = {
-  title: "Telesto Node — Mission Control",
-  description: "Real-Time Marine Ecosystem Monitoring & Health Analytics",
-  manifest: "/manifest.json",
-};
+import { useCallback, useEffect, useState } from "react";
+import { countPending } from "./offlineStore";
 
-export const viewport = {
-  themeColor: "#171d20",
-};
+const POLL_INTERVAL_MS = 5000;
 
-export default function RootLayout({ children }) {
-  return (
-    <html lang="en">
-      <head>
-        <link
-          href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css"
-          rel="stylesheet"
-        />
-      </head>
-      <body className="font-mono">
-        <Script
-          src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"
-          strategy="beforeInteractive"
-        />
-        {/* Cloudflare Turnstile — loaded globally (not per-page) since it's
-            used on login, signup, and forgot-password. `render=explicit`
-            means pages call window.turnstile.render(...) themselves
-            instead of it auto-rendering every div with the widget class —
-            needed because those forms mount/unmount conditionally. */}
-        <Script
-          src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
-          strategy="afterInteractive"
-        />
-        <ServiceWorkerRegister />
-        <Providers>{children}</Providers>
-      </body>
-    </html>
-  );
+/**
+ * Live count of unsynced items in the offline queue. IndexedDB has no
+ * built-in change-notification API, so this polls — cheap, since it's
+ * just a local index scan, not a network call. Exposes `refresh` so
+ * callers can force an immediate update right after enqueueing
+ * something, instead of waiting up to 5s for the next poll.
+ */
+export function useOfflineQueueCount(kind = null) {
+  const [count, setCount] = useState(0);
+
+  const refresh = useCallback(() => {
+    countPending(kind)
+      .then(setCount)
+      .catch((err) => console.error("Offline queue count failed:", err));
+  }, [kind]);
+
+  useEffect(() => {
+    refresh();
+    const intervalId = setInterval(refresh, POLL_INTERVAL_MS);
+    return () => clearInterval(intervalId);
+  }, [refresh]);
+
+  return { count, refresh };
 }
