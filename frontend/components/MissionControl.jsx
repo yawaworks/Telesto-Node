@@ -11,6 +11,7 @@ import { useFrameDetection } from "../lib/useFrameDetection";
 import { useTelemetry } from "../lib/useTelemetry";
 import DetectionOverlay from "./DetectionOverlay";
 import SnapshotAnnotator from "./SnapshotAnnotator";
+import OfflineStatusBadge from "./OfflineStatusBadge";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
 const BLEACHING_ALERT_THRESHOLD = 0.4;
@@ -722,6 +723,7 @@ export default function MissionControl({ embedded = false } = {}) {
         </div>
 
         <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+          <OfflineStatusBadge />
           <button
             onClick={() => setTelemetryOpen((v) => !v)}
             className={`sm:hidden border rounded-lg px-2 py-1.5 text-[10px] uppercase tracking-widest whitespace-nowrap ${
