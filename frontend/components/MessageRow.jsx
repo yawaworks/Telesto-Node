@@ -1,6 +1,7 @@
 "use client";
 
 import Avatar from "./Avatar";
+import { FlagIcon, ForwardIcon, PaperclipIcon, PinIcon, ReplyIcon, TrashIcon } from "./icons";
 
 function formatTime(iso) {
   if (!iso) return "";
@@ -37,7 +38,7 @@ function AttachmentView({ attachment }) {
       rel="noreferrer"
       className="mt-1.5 flex items-center gap-2 bg-black/20 border border-[#3a444a] rounded-lg px-3 py-2 max-w-xs text-xs text-[#8fa3ad] hover:text-[#d3dbe0] hover:border-[#8fa3ad]/60 transition"
     >
-      📎 <span className="truncate">{attachment.name}</span>
+      <PaperclipIcon className="w-3.5 h-3.5 shrink-0" /> <span className="truncate">{attachment.name}</span>
     </a>
   );
 }
@@ -89,13 +90,17 @@ export default function MessageRow({
           <p className="flex items-baseline gap-2 mb-0.5">
             <span className="text-xs font-bold text-[#d3dbe0]">{isMe ? "You" : message.sender_email}</span>
             <span className="text-[10px] text-[#5a6a72]">{formatTime(message.created_at)}</span>
-            {message.pinned && <span className="text-[10px] text-[#8fa3ad]">📌 Pinned</span>}
+            {message.pinned && (
+              <span className="flex items-center gap-1 text-[10px] text-[#8fa3ad]">
+                <PinIcon className="w-3 h-3" /> Pinned
+              </span>
+            )}
           </p>
         )}
 
         {message.forwarded_from && (
-          <p className="text-[10px] text-[#5a6a72] italic mb-0.5">
-            ↪ Forwarded from {message.forwarded_from.sender_email}
+          <p className="flex items-center gap-1 text-[10px] text-[#5a6a72] italic mb-0.5">
+            <ForwardIcon className="w-3 h-3 not-italic" /> Forwarded from {message.forwarded_from.sender_email}
           </p>
         )}
 
@@ -125,20 +130,20 @@ export default function MessageRow({
       {!message.deleted && (
         <div className="hidden group-hover:flex items-center gap-0.5 absolute right-1 -top-2 bg-[#1c2226] border border-[#3a444a] rounded-md px-1 py-0.5 shadow-sm">
           <ActionButton title="Reply" onClick={() => onReply(message)}>
-            ↩
+            <ReplyIcon />
           </ActionButton>
           <ActionButton title="Forward" onClick={() => onForward(message)}>
-            ↪
+            <ForwardIcon />
           </ActionButton>
           <ActionButton title={message.pinned ? "Unpin" : "Pin"} onClick={() => onTogglePin(message)}>
-            📌
+            <PinIcon />
           </ActionButton>
           <ActionButton title="Report" onClick={() => onReport(message)}>
-            ⚑
+            <FlagIcon />
           </ActionButton>
           {canDelete && (
             <ActionButton title="Delete" onClick={() => onDelete(message)}>
-              🗑
+              <TrashIcon />
             </ActionButton>
           )}
         </div>

@@ -13,6 +13,7 @@ import CreateChannelModal from "../../components/CreateChannelModal";
 import MemberAdminPanel from "../../components/MemberAdminPanel";
 import MissionControl from "../../components/MissionControl";
 import PinnedMessagesPanel from "../../components/PinnedMessagesPanel";
+import { PinIcon } from "../../components/icons";
 import {
   createChannel,
   demoteChannelAdmin,
@@ -201,9 +202,9 @@ export default function WorkspacePage() {
                   type="button"
                   onClick={() => setShowPinnedPanel((v) => !v)}
                   title="Pinned messages"
-                  className="text-[#5a6a72] hover:text-[#8fa3ad] text-sm"
+                  className="text-[#5a6a72] hover:text-[#8fa3ad]"
                 >
-                  📌
+                  <PinIcon className="w-4 h-4" />
                 </button>
                 <MemberStack
                   members={activeMembers}

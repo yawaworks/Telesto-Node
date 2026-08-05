@@ -176,7 +176,7 @@ export default function CallsTab({ channelId, currentEmail, isAdmin }) {
     setActiveRoom(callRoom);
     postMessage(channelId, {
       senderEmail: currentEmail,
-      text: "📞 Started a call — join from the Calls tab.",
+      text: "Call started — join from the Calls tab.",
     }).catch((err) => console.error("Call announcement failed:", err));
   }
 

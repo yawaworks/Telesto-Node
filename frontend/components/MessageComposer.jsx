@@ -2,14 +2,21 @@
 
 import { useRef, useState } from "react";
 import { uploadChannelAttachment } from "../lib/workspaceApi";
+import { MicIcon, PaperclipIcon } from "./icons";
 
 function AttachmentChip({ attachment, onRemove }) {
   return (
     <span className="flex items-center gap-1.5 bg-[#8fa3ad]/10 border border-[#8fa3ad]/40 rounded-md pl-2 pr-1 py-1 text-xs text-[#b7c4cc]">
       {attachment.kind === "voice" ? (
-        <>🎙️ Voice message{attachment.duration_seconds ? ` · ${Math.round(attachment.duration_seconds)}s` : ""}</>
+        <>
+          <MicIcon className="w-3 h-3 text-[#8fa3ad]" />
+          Voice message{attachment.duration_seconds ? ` · ${Math.round(attachment.duration_seconds)}s` : ""}
+        </>
       ) : (
-        <>📎 {attachment.name}</>
+        <>
+          <PaperclipIcon className="w-3 h-3 text-[#8fa3ad]" />
+          {attachment.name}
+        </>
       )}
       <button
         type="button"
@@ -169,7 +176,7 @@ export default function MessageComposer({ channelId, currentEmail, replyingTo, o
           title="Attach a file"
           className="shrink-0 w-9 h-9 flex items-center justify-center rounded-lg border border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.06] disabled:opacity-40"
         >
-          📎
+          <PaperclipIcon className="w-4 h-4" />
         </button>
         <button
           type="button"
@@ -182,7 +189,7 @@ export default function MessageComposer({ channelId, currentEmail, replyingTo, o
               : "border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.06]"
           }`}
         >
-          🎙️
+          <MicIcon className="w-4 h-4" />
         </button>
 
         <textarea
