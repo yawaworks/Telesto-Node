@@ -2,6 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useChannelMessages } from "../lib/useChannelMessages";
+import Avatar from "./Avatar";
+
+const GROUP_WINDOW_MS = 5 * 60 * 1000; // messages within 5 minutes of the same sender collapse into one group
 
 function formatTime(iso) {
   if (!iso) return "";
@@ -10,6 +13,13 @@ function formatTime(iso) {
   } catch {
     return "";
   }
+}
+
+function isSameGroup(a, b) {
+  if (!a || !b) return false;
+  if (a.sender_email !== b.sender_email) return false;
+  const gap = new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+  return gap >= 0 && gap < GROUP_WINDOW_MS;
 }
 
 export default function ChatPanel({ channelId, currentEmail }) {
@@ -36,31 +46,44 @@ export default function ChatPanel({ channelId, currentEmail }) {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 flex flex-col gap-3">
+      <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 flex flex-col">
         {loading && <p className="text-xs text-[#5a6a72]">Loading messages…</p>}
         {!loading && messages.length === 0 && (
-          <p className="text-xs text-[#5a6a72]">
-            No messages yet — say hello to your team.
-          </p>
+          <p className="text-xs text-[#5a6a72]">No messages yet — say hello to your team.</p>
         )}
-        {messages.map((m) => {
+        {messages.map((m, i) => {
+          const prev = messages[i - 1];
+          const grouped = isSameGroup(prev, m);
           const isMe = m.sender_email === currentEmail;
+
           return (
             <div
               key={m.id}
-              className={`max-w-[80%] sm:max-w-[60%] rounded-xl px-3.5 py-2.5 ${
-                isMe
-                  ? "self-end bg-[#8fa3ad]/15 border border-[#8fa3ad]/30"
-                  : "self-start bg-[#1c2226] border border-[#3a444a]"
+              className={`group flex gap-3 px-2 -mx-2 rounded-lg hover:bg-white/[0.03] ${
+                grouped ? "py-0.5" : "pt-3 pb-0.5"
               }`}
             >
-              {!isMe && (
-                <p className="text-[10px] uppercase tracking-widest text-[#8fa3ad] mb-1">
-                  {m.sender_email}
+              <div className="w-8 shrink-0 flex items-start justify-center pt-0.5">
+                {!grouped && <Avatar email={m.sender_email} size="sm" />}
+                {grouped && (
+                  <span className="hidden group-hover:block text-[9px] text-[#5a6a72] pt-1">
+                    {formatTime(m.created_at)}
+                  </span>
+                )}
+              </div>
+              <div className="min-w-0 flex-1">
+                {!grouped && (
+                  <p className="flex items-baseline gap-2 mb-0.5">
+                    <span className="text-xs font-bold text-[#d3dbe0]">
+                      {isMe ? "You" : m.sender_email}
+                    </span>
+                    <span className="text-[10px] text-[#5a6a72]">{formatTime(m.created_at)}</span>
+                  </p>
+                )}
+                <p className="text-sm text-[#b7c4cc] whitespace-pre-wrap break-words leading-relaxed">
+                  {m.text}
                 </p>
-              )}
-              <p className="text-sm text-[#d3dbe0] whitespace-pre-wrap break-words">{m.text}</p>
-              <p className="text-[10px] text-[#5a6a72] mt-1 text-right">{formatTime(m.created_at)}</p>
+              </div>
             </div>
           );
         })}
