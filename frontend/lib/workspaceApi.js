@@ -184,3 +184,39 @@ export function meetingIcsUrl(meetingId, requesterEmail) {
   const params = new URLSearchParams({ requester_email: requesterEmail });
   return `${API_BASE_URL}/meetings/${meetingId}/ics?${params}`;
 }
+// --- Bioacoustics (SurfPerch similarity search — see backend/app/bioacoustics.py) ---
+
+export async function createAcousticReference(channelId, { file, label, createdBy }) {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("label", label);
+  form.append("created_by", createdBy);
+  const res = await fetch(`${API_BASE_URL}/channels/${channelId}/acoustic-references`, {
+    method: "POST",
+    body: form,
+  });
+  return handle(res);
+}
+
+export async function listAcousticReferences(channelId, requesterEmail) {
+  const params = new URLSearchParams({ requester_email: requesterEmail });
+  return fetch(`${API_BASE_URL}/channels/${channelId}/acoustic-references?${params}`).then(handle);
+}
+
+export async function deleteAcousticReference(referenceId, requestedBy) {
+  const params = new URLSearchParams({ requested_by: requestedBy });
+  return fetch(`${API_BASE_URL}/acoustic-references/${referenceId}?${params}`, { method: "DELETE" }).then(handle);
+}
+
+export async function analyzeAcousticClip(channelId, { file, referenceId, requesterEmail, threshold = 0.6 }) {
+  const form = new FormData();
+  form.append("file", file);
+  form.append("reference_id", referenceId);
+  form.append("requester_email", requesterEmail);
+  form.append("threshold", String(threshold));
+  const res = await fetch(`${API_BASE_URL}/channels/${channelId}/acoustic-analysis`, {
+    method: "POST",
+    body: form,
+  });
+  return handle(res);
+}

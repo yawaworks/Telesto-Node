@@ -75,3 +75,10 @@ export function ForwardIcon({ className = "w-3.5 h-3.5" }) {
     </svg>
   );
 }
+export function WaveformIcon({ className = "w-4 h-4" }) {
+  return (
+    <svg {...base} className={className} stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 12h2M7 8v8M11 5v14M15 9v6M19 11v2M21 12h0" />
+    </svg>
+  );
+}

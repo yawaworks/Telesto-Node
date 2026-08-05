@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 
 import AppRail from "../../components/AppRail";
 import Avatar from "../../components/Avatar";
+import AcousticsTab from "../../components/AcousticsTab";
 import CallsTab from "../../components/CallsTab";
 import ChannelSidebar from "../../components/ChannelSidebar";
 import ChatPanel from "../../components/ChatPanel";
@@ -27,6 +28,7 @@ import { useHeartbeat, usePresence } from "../../lib/usePresence";
 const TABS = [
   { id: "chat", label: "Chat" },
   { id: "calls", label: "Calls" },
+  { id: "acoustics", label: "Acoustics" },
   { id: "mission", label: "Mission Control" },
   { id: "files", label: "Files" },
   { id: "reports", label: "Reports" },
@@ -266,6 +268,10 @@ export default function WorkspacePage() {
 
               {activeTab === "calls" && (
                 <CallsTab channelId={activeChannel.id} currentEmail={email} isAdmin={isAdmin} />
+              )}
+
+              {activeTab === "acoustics" && (
+                <AcousticsTab channelId={activeChannel.id} currentEmail={email} />
               )}
 
               {activeTab === "mission" && <MissionControl embedded />}
