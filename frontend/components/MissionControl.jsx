@@ -7,7 +7,7 @@ import Link from "next/link";
 import { initGamepadNavigation } from "../lib/gamepad-controller";
 import { initBathymetryMap } from "../lib/bathymetry-map";
 import { loadSpeciesMarkers } from "../lib/species-markers";
-import { useFrameDetection } from "../lib/useFrameDetection";
+import { useFrameDetection, DEFAULT_CONF_THRESHOLD } from "../lib/useFrameDetection";
 import { useTelemetry } from "../lib/useTelemetry";
 import DetectionOverlay from "./DetectionOverlay";
 import SnapshotAnnotator from "./SnapshotAnnotator";
@@ -126,10 +126,25 @@ export default function MissionControl({ embedded = false } = {}) {
   const [sharedSnapshots, setSharedSnapshots] = useState([]);
   const [snapshotLibraryLoading, setSnapshotLibraryLoading] = useState(false);
 
+  // Minimum model confidence (0-1) a detection needs to be shown/logged at
+  // all. Exposed as a slider in the actions panel — lower catches more
+  // (noisier) detections, higher shows only the model's most confident
+  // calls. Session-only by design, same as the rest of this panel's
+  // controls; it doesn't persist across reloads.
+  const [confThreshold, setConfThreshold] = useState(DEFAULT_CONF_THRESHOLD);
+
+  // "mine" vs "team" scoping for exported/emailed mission reports — see
+  // app/report.py. Defaults to "mine" so a researcher's export only ever
+  // reflects their own dive unless they deliberately ask for the pooled
+  // team-wide view.
+  const [reportScope, setReportScope] = useState("mine");
+
   const { boxes, ghostBoxes, coralBleachingRatio, opticalFlow, status } = useFrameDetection(videoRef, {
     enabled: viewMode === "video" && !videoLoadError,
     telemetry,
     alertEmail: session?.user?.email,
+    ownerEmail: session?.user?.email,
+    confThreshold,
   });
   const alert =
     coralBleachingRatio !== null && coralBleachingRatio >= BLEACHING_ALERT_THRESHOLD;
@@ -547,7 +562,15 @@ export default function MissionControl({ embedded = false } = {}) {
         depth: diveLogSample?.depth_m !== undefined ? `${diveLogSample.depth_m.toFixed(1)} m` : telemetry.depth,
         temp: diveLogSample?.temp_c !== undefined ? `${diveLogSample.temp_c.toFixed(1)} °C` : telemetry.temp,
       };
-      const params = new URLSearchParams(activeTelemetry);
+      // "mine" is meaningless without a signed-in identity to scope to —
+      // fall back to "team" rather than sending a scope=mine request the
+      // backend will reject with a 400.
+      const effectiveScope = reportScope === "mine" && !session?.user?.email ? "team" : reportScope;
+      const params = new URLSearchParams({
+        ...activeTelemetry,
+        scope: effectiveScope,
+        ...(session?.user?.email ? { owner_email: session.user.email } : {}),
+      });
       const response = await fetch(`${API_BASE_URL}/export-report?${params}`);
       if (!response.ok) throw new Error(`Export failed: ${response.status}`);
 
@@ -582,7 +605,12 @@ export default function MissionControl({ embedded = false } = {}) {
       const response = await fetch(`${API_BASE_URL}/send-mission-report-email`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...activeTelemetry, recipient_email: recipientEmail }),
+        body: JSON.stringify({
+          ...activeTelemetry,
+          recipient_email: recipientEmail,
+          scope: reportScope,
+          owner_email: recipientEmail,
+        }),
       });
       if (!response.ok) throw new Error(`Email report failed: ${response.status}`);
 
@@ -905,12 +933,56 @@ export default function MissionControl({ embedded = false } = {}) {
             ✕
           </button>
         </div>
+        <div className="pointer-events-auto bg-[#1c2226]/90 border border-[#3a444a] rounded-lg px-3 py-2">
+          <div className="flex items-center justify-between text-[10px] uppercase tracking-widest text-[#8fa3ad] mb-1.5">
+            <label htmlFor="conf-threshold-slider">Confidence</label>
+            <span className="text-[#d3dbe0] tabular-nums">{Math.round(confThreshold * 100)}%</span>
+          </div>
+          <input
+            id="conf-threshold-slider"
+            type="range"
+            min="0.05"
+            max="0.9"
+            step="0.05"
+            value={confThreshold}
+            onChange={(e) => setConfThreshold(parseFloat(e.target.value))}
+            className="w-full h-1 accent-[#8fa3ad] cursor-pointer"
+            aria-label="Detection confidence threshold"
+          />
+        </div>
         <button
           onClick={handleDiscoverySnapshot}
           className="pointer-events-auto bg-[#1c2226]/90 border border-[#3a444a] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left text-[#b7c4cc] hover:bg-[#2a333a] hover:border-[#8fa3ad]/60"
         >
           Snapshot
         </button>
+        <div className="pointer-events-auto bg-[#1c2226]/90 border border-[#3a444a] rounded-lg px-3 py-2">
+          <div className="text-[10px] uppercase tracking-widest text-[#8fa3ad] mb-1.5">
+            Report scope
+          </div>
+          <div className="flex gap-1">
+            <button
+              onClick={() => setReportScope("mine")}
+              className={`flex-1 rounded px-2 py-1 text-[10px] uppercase tracking-widest ${
+                reportScope === "mine"
+                  ? "bg-[#8fa3ad]/20 text-[#d3dbe0] border border-[#8fa3ad]/50"
+                  : "text-[#8fa3ad] border border-transparent hover:text-[#b7c4cc]"
+              }`}
+            >
+              Mine
+            </button>
+            <button
+              onClick={() => setReportScope("team")}
+              className={`flex-1 rounded px-2 py-1 text-[10px] uppercase tracking-widest ${
+                reportScope === "team"
+                  ? "bg-[#8fa3ad]/20 text-[#d3dbe0] border border-[#8fa3ad]/50"
+                  : "text-[#8fa3ad] border border-transparent hover:text-[#b7c4cc]"
+              }`}
+            >
+              Team
+            </button>
+          </div>
+        </div>
         <button
           onClick={handleExportReport}
           disabled={exportingReport}

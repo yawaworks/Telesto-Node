@@ -27,10 +27,19 @@ def _mongo_collection():
     return db["detections"] if db is not None else None
 
 
-def log_detections(boxes, coral_bleaching_ratio):
+def log_detections(boxes, coral_bleaching_ratio, owner_email: str | None = None):
     """Called from /analyze-frame after each successful inference so the
     export report can summarize the whole session. Writes to MongoDB when
-    available; falls back to an in-memory list otherwise."""
+    available; falls back to an in-memory list otherwise.
+
+    owner_email is the logged-in researcher running this mission (same
+    session email already threaded through analyze-frame for alerts).
+    It's stored on every entry so reports can be scoped to "mine" vs
+    "team" later, the same mine/shared convention already used for clips
+    and snapshots. It's optional — entries logged without it (older data,
+    or no session) are only visible under "team" scope, never "mine",
+    so they can't silently get attributed to whoever asks first.
+    """
     timestamp = datetime.now(timezone.utc)
     entries = []
     for box in boxes:
@@ -40,6 +49,7 @@ def log_detections(boxes, coral_bleaching_ratio):
                 "label": box["label"],
                 "confidence": box["confidence"],
                 "source": box.get("source"),
+                "owner_email": owner_email,
             }
         )
     if coral_bleaching_ratio is not None:
@@ -49,6 +59,7 @@ def log_detections(boxes, coral_bleaching_ratio):
                 "label": "__coral_bleaching_reading__",
                 "confidence": coral_bleaching_ratio,
                 "source": "coral_bleach",
+                "owner_email": owner_email,
             }
         )
 
@@ -66,17 +77,36 @@ def log_detections(boxes, coral_bleaching_ratio):
     detection_log.extend(entries)
 
 
-def _fetch_all_entries():
-    """Reads every logged entry from MongoDB if connected, else the
-    in-memory fallback list."""
+def _fetch_all_entries(owner_email: str | None = None, scope: str = "team"):
+    """Reads logged entries from MongoDB if connected, else the in-memory
+    fallback list.
+
+    scope="mine" returns only entries logged under owner_email (requires
+    owner_email; entries with no owner_email on them are excluded — they
+    predate scoping or came from a logged-out session, and attributing
+    them to whoever asks would be a guess).
+
+    scope="team" (default, matches the app's previous unscoped behavior)
+    returns every entry regardless of who logged it. This is a real
+    design decision: until Team Workspace exists, "team" doesn't mean
+    "my dive team" — it means every researcher who has ever used this
+    deployment, since there's no concept of a shared workspace boundary
+    yet. Treat "team" reports as provisional until that lands.
+    """
     collection = _mongo_collection()
     if collection is not None:
         try:
-            return list(collection.find({}))
+            query = {"owner_email": owner_email} if scope == "mine" else {}
+            return list(collection.find(query))
         except Exception as exc:
             print(f"[report] MongoDB read failed, falling back to memory: {exc}")
+            entries = detection_log
+    else:
+        entries = detection_log
 
-    return detection_log
+    if scope == "mine":
+        return [e for e in entries if e.get("owner_email") == owner_email]
+    return entries
 
 
 def _health_index(avg_bleaching_ratio):
@@ -107,11 +137,19 @@ def _compute_maxn(species_entries):
     return maxn, len(per_frame_counts)
 
 
-def generate_mission_report(telemetry: dict) -> bytes:
+def generate_mission_report(
+    telemetry: dict, owner_email: str | None = None, scope: str = "team"
+) -> bytes:
     """Builds a PDF summarizing species detected, counts, and ecosystem
-    health index from the session's detection_log, plus the mission
-    telemetry snapshot (depth, coordinates, etc.) passed in from the HUD."""
-    all_entries = _fetch_all_entries()
+    health index from logged detections, plus the mission telemetry
+    snapshot (depth, coordinates, etc.) passed in from the HUD.
+
+    scope="mine" limits this to the requesting researcher's own detections
+    (owner_email required for that to return anything). scope="team"
+    (default) pools every detection ever logged, matching the app's prior
+    unscoped behavior — see _fetch_all_entries for why that's provisional.
+    """
+    all_entries = _fetch_all_entries(owner_email=owner_email, scope=scope)
     species_entries = [d for d in all_entries if d["source"] != "coral_bleach"]
     bleach_entries = [d for d in all_entries if d["source"] == "coral_bleach"]
 
@@ -147,6 +185,12 @@ def generate_mission_report(telemetry: dict) -> bytes:
         "TelestoLabel", parent=styles["Normal"], textColor=colors.HexColor("#555555")
     )
 
+    scope_label = (
+        f"Scope: this researcher's detections only ({owner_email})"
+        if scope == "mine"
+        else "Scope: all researchers on this deployment (team-wide)"
+    )
+
     story = []
     story.append(Paragraph("Telesto Node — Field Mission Report", title_style))
     story.append(
@@ -155,6 +199,7 @@ def generate_mission_report(telemetry: dict) -> bytes:
             label_style,
         )
     )
+    story.append(Paragraph(scope_label, label_style))
     story.append(Spacer(1, 12))
     story.append(HRFlowable(width="100%", color=colors.HexColor("#cccccc")))
     story.append(Spacer(1, 12))

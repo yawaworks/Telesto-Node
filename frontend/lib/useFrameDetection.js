@@ -6,7 +6,11 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5
 // Every 2 model calls per frame now (marine-fishes + bleach classifier), so
 // space captures out more to conserve Roboflow credits.
 const CAPTURE_INTERVAL_MS = 2500;
-const CONF_THRESHOLD = 0.2;
+// Default only — the actual value used per-request now comes from the
+// confThreshold option (backed by a UI slider in MissionControl). Kept
+// as the fallback so any caller that doesn't pass one still behaves
+// exactly like before.
+export const DEFAULT_CONF_THRESHOLD = 0.2;
 
 const MIN_CONSECUTIVE_HITS = 1;
 const HISTORY_LENGTH = 3;
@@ -36,6 +40,15 @@ function distance(a, b) {
  * @param {string} [options.alertEmail] - the logged-in researcher's
  *   session email, sent with every frame so detection alerts go to
  *   whoever is actually running this mission, not one fixed inbox.
+ * @param {string} [options.ownerEmail] - same session email, stored on
+ *   every logged detection so mission reports can later be scoped to
+ *   "mine" vs "team" (see MissionControl's report scope toggle).
+ * @param {number} [options.confThreshold] - minimum Roboflow confidence
+ *   (0-1) for a detection to be returned at all. Lower catches more
+ *   (noisier) detections; higher shows only the model's most confident
+ *   calls. Read via a ref, same pattern as telemetry/alertEmail, so
+ *   dragging the slider doesn't tear down and restart the capture
+ *   interval — only the next scheduled frame picks up the new value.
  *
  * Returns both `boxes` (species actually visible in the current frame)
  * and `ghostBoxes` (species seen within the last GHOST_EXPIRY_MS but not
@@ -43,7 +56,10 @@ function distance(a, b) {
  * they were last seen at, so a hover can seek the video back to that
  * moment). DetectionOverlay is responsible for rendering/hovering both.
  */
-export function useFrameDetection(videoRef, { enabled = true, telemetry, alertEmail } = {}) {
+export function useFrameDetection(
+  videoRef,
+  { enabled = true, telemetry, alertEmail, ownerEmail, confThreshold = DEFAULT_CONF_THRESHOLD } = {}
+) {
   const [boxes, setBoxes] = useState([]);
   const [ghostBoxes, setGhostBoxes] = useState([]);
   const [classifications, setClassifications] = useState([]);
@@ -80,6 +96,20 @@ export function useFrameDetection(videoRef, { enabled = true, telemetry, alertEm
   useEffect(() => {
     alertEmailRef.current = alertEmail;
   }, [alertEmail]);
+
+  const ownerEmailRef = useRef(ownerEmail);
+  useEffect(() => {
+    ownerEmailRef.current = ownerEmail;
+  }, [ownerEmail]);
+
+  // Same ref pattern — the slider can move every render while a capture
+  // is mid-flight; reading it via ref means the in-flight request keeps
+  // using the value it started with, and the *next* interval tick is
+  // the first one to see a dragged slider's new value.
+  const confThresholdRef = useRef(confThreshold);
+  useEffect(() => {
+    confThresholdRef.current = confThreshold;
+  }, [confThreshold]);
 
   useEffect(() => {
     if (!enabled) {
@@ -180,7 +210,9 @@ export function useFrameDetection(videoRef, { enabled = true, telemetry, alertEm
         // latitude/longitude are query params on the backend (same as
         // conf_threshold), not form fields — FastAPI reads plain scalar
         // params as query params when the request body is multipart.
-        const params = new URLSearchParams({ conf_threshold: String(CONF_THRESHOLD) });
+        const params = new URLSearchParams({
+          conf_threshold: String(confThresholdRef.current),
+        });
         const currentTelemetry = telemetryRef.current;
         if (currentTelemetry?.lat != null && currentTelemetry?.lng != null) {
           params.set("latitude", String(currentTelemetry.lat));
@@ -191,6 +223,11 @@ export function useFrameDetection(videoRef, { enabled = true, telemetry, alertEm
         // with every frame the same way lat/lng does.
         if (alertEmailRef.current) {
           params.set("alert_email", alertEmailRef.current);
+        }
+        // Stored on every logged detection so mission reports can later
+        // be filtered to "mine" vs "team" (see app/report.py).
+        if (ownerEmailRef.current) {
+          params.set("owner_email", ownerEmailRef.current);
         }
 
         const response = await fetch(

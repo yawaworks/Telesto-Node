@@ -170,6 +170,7 @@ async def analyze_frame(
     latitude: float = MISSION_LAT,
     longitude: float = MISSION_LNG,
     alert_email: str | None = None,
+    owner_email: str | None = None,
 ):
     """Runs every enabled Roboflow model against this frame (marine-fishes
     species detection + the coral bleach classifier by default), merging
@@ -185,6 +186,12 @@ async def analyze_frame(
     alert_email is the currently logged-in researcher's session email,
     sent by the frontend so detection alerts go to whoever is actually
     running THIS mission, not one hardcoded inbox.
+
+    owner_email is that same session email, stored on every logged
+    detection so mission reports can later be scoped to "mine" vs
+    "team" (see app/report.py). Usually identical to alert_email; kept
+    as a separate param since a future workspace scenario could log
+    detections under someone other than the alert recipient.
     """
     raw_bytes = await file.read()
     np_arr = np.frombuffer(raw_bytes, np.uint8)
@@ -223,7 +230,7 @@ async def analyze_frame(
         else:
             frame_ratio = None
 
-    log_detections(result["boxes"], frame_ratio)
+    log_detections(result["boxes"], frame_ratio, owner_email=owner_email)
 
     # Fire detection alerts directly via Resend (no n8n in the path)
     # without blocking the response the frontend is waiting on.
@@ -488,9 +495,21 @@ async def export_report(
     temp: str = "17.2°C",
     salinity: str = "34.9 PSU",
     heading: str = "086°",
+    scope: str = "team",
+    owner_email: str | None = None,
 ):
-    """Generates a PDF mission report summarizing every species detected and
-    the average coral bleaching reading logged so far this session."""
+    """Generates a PDF mission report summarizing species detected and
+    the average coral bleaching reading logged so far.
+
+    scope="mine" (requires owner_email) limits the report to detections
+    logged under that researcher's own session. scope="team" (default)
+    pools every detection logged by anyone, matching this endpoint's
+    original behavior — see app/report.py for why that's provisional
+    until Team Workspace defines an actual team boundary.
+    """
+    if scope == "mine" and not owner_email:
+        raise HTTPException(status_code=400, detail="owner_email is required for scope=mine")
+
     telemetry = {
         "depth": depth,
         "coords": coords,
@@ -498,7 +517,7 @@ async def export_report(
         "salinity": salinity,
         "heading": heading,
     }
-    pdf_bytes = generate_mission_report(telemetry)
+    pdf_bytes = generate_mission_report(telemetry, owner_email=owner_email, scope=scope)
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -515,6 +534,8 @@ class EmailReportRequest(BaseModel):
     salinity: str = "34.9 PSU"
     heading: str = "086°"
     recipient_email: str
+    scope: str = "team"
+    owner_email: str | None = None
 
 
 @app.post("/send-mission-report-email")
@@ -528,6 +549,9 @@ async def send_mission_report_email_endpoint(request: Request, payload: EmailRep
     (the PDF generator, and now the Resend call) without an external
     hosting dependency in between.
     """
+    if payload.scope == "mine" and not payload.owner_email:
+        raise HTTPException(status_code=400, detail="owner_email is required for scope=mine")
+
     telemetry = {
         "depth": payload.depth,
         "coords": payload.coords,
@@ -535,7 +559,9 @@ async def send_mission_report_email_endpoint(request: Request, payload: EmailRep
         "salinity": payload.salinity,
         "heading": payload.heading,
     }
-    pdf_bytes = generate_mission_report(telemetry)
+    pdf_bytes = generate_mission_report(
+        telemetry, owner_email=payload.owner_email, scope=payload.scope
+    )
 
     try:
         await send_mission_report_email(pdf_bytes, payload.recipient_email)
