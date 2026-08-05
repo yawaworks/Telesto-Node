@@ -1,18 +1,21 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { getPresence, sendHeartbeat } from "./workspaceApi";
+import { useCallback, useEffect, useState } from "react";
+import { getPresence, sendHeartbeat, setPresenceStatus } from "./workspaceApi";
 
 const HEARTBEAT_INTERVAL_MS = 30000;
 const PRESENCE_POLL_INTERVAL_MS = 15000;
 
 /**
  * Pings the backend every 30s while mounted, marking the given researcher
- * online. Mount this once near the top of the workspace shell — not
- * per-panel — so switching tabs doesn't reset the interval or cause
- * duplicate heartbeats.
+ * online, and exposes a `setStatus` function for the manual Active/Away/
+ * Busy/Offline override. Mount this once near the top of the workspace
+ * shell — not per-panel — so switching tabs doesn't reset the interval or
+ * cause duplicate heartbeats.
  */
 export function useHeartbeat(email) {
+  const [myStatus, setMyStatus] = useState(null); // null until the researcher explicitly sets one
+
   useEffect(() => {
     if (!email) return;
 
@@ -31,14 +34,30 @@ export function useHeartbeat(email) {
       clearInterval(intervalId);
     };
   }, [email]);
+
+  const setStatus = useCallback(
+    async (status) => {
+      if (!email) return;
+      setMyStatus(status); // optimistic — status pickers should feel instant
+      try {
+        await setPresenceStatus(email, status);
+      } catch (err) {
+        console.error("Setting presence status failed:", err);
+      }
+    },
+    [email]
+  );
+
+  return { myStatus, setStatus };
 }
 
 /**
- * Polls online/offline status for a list of teammate emails, keyed by
- * email for easy lookup. `emails` should be a stable array — pass a
- * memoized array (e.g. from useMemo keyed on the channel's member list),
- * since a fresh array literal every render restarts the poll on every
- * render instead of on every real membership change.
+ * Polls online/offline + effective status (active/away/busy/offline) for
+ * a list of teammate emails, keyed by email for easy lookup. `emails`
+ * should be a stable array — pass a memoized array (e.g. from useMemo
+ * keyed on the channel's member list), since a fresh array literal every
+ * render restarts the poll on every render instead of on every real
+ * membership change.
  */
 export function usePresence(emails) {
   const [presence, setPresence] = useState({});

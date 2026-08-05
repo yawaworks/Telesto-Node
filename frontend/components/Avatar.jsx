@@ -5,6 +5,20 @@
 // read as "part of this cockpit" rather than a foreign UI kit pasted in.
 const AVATAR_HUES = ["#8fa3ad", "#6e8fa3", "#7f9a8f", "#9a8f7f", "#8f7f9a", "#7f8f9a"];
 
+const STATUS_COLORS = {
+  active: "#7fb37f",
+  away: "#a48a55",
+  busy: "#c47a6e",
+  offline: "#3a444a",
+};
+
+export const STATUS_LABELS = {
+  active: "Active",
+  away: "Away",
+  busy: "Busy",
+  offline: "Offline",
+};
+
 function hashString(str) {
   let hash = 0;
   for (let i = 0; i < str.length; i++) {
@@ -30,9 +44,11 @@ const SIZE_CLASSES = {
 /**
  * Deterministic initials avatar — same email always renders the same
  * color, so teammates become visually recognizable across the workspace
- * without needing uploaded profile photos.
+ * without needing uploaded profile photos. `status` is one of
+ * active/away/busy/offline (see STATUS_COLORS); pass nothing to render a
+ * plain avatar with no presence dot at all.
  */
-export default function Avatar({ email, size = "md", online = null, ring = false, className = "" }) {
+export default function Avatar({ email, size = "md", status = null, ring = false, className = "" }) {
   const color = AVATAR_HUES[hashString(email || "") % AVATAR_HUES.length];
   return (
     <span className={`relative inline-flex shrink-0 ${className}`}>
@@ -45,12 +61,11 @@ export default function Avatar({ email, size = "md", online = null, ring = false
       >
         {initialsFor(email)}
       </span>
-      {online !== null && (
+      {status && (
         <span
-          className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-[#171d20] ${
-            online ? "bg-[#7fb37f]" : "bg-[#3a444a]"
-          }`}
-          title={online ? "Online" : "Offline"}
+          className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-[#171d20]"
+          style={{ backgroundColor: STATUS_COLORS[status] || STATUS_COLORS.offline }}
+          title={STATUS_LABELS[status] || "Offline"}
         />
       )}
     </span>

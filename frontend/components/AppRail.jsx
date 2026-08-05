@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import Avatar from "./Avatar";
+import StatusPicker from "./StatusPicker";
 
 function BrandMark() {
   // Same inline-SVG language as the onboarding tour icons (targeting
@@ -16,7 +16,7 @@ function BrandMark() {
   );
 }
 
-export default function AppRail({ email }) {
+export default function AppRail({ email, myStatus, onChangeStatus }) {
   return (
     <div className="w-14 shrink-0 bg-[#12161a] border-r border-[#3a444a] flex flex-col items-center py-3 h-full">
       <Link
@@ -46,9 +46,14 @@ export default function AppRail({ email }) {
 
       <div className="flex-1" />
 
-      <Link href="/profile" title="Your profile" className="rounded-full hover:ring-2 hover:ring-[#8fa3ad]/40 transition">
-        <Avatar email={email} size="md" online={Boolean(email)} />
+      <Link href="/profile" title="Your profile" className="mb-2 rounded-full hover:ring-2 hover:ring-[#8fa3ad]/40 transition">
+        <svg viewBox="0 0 24 24" className="w-5 h-5" fill="none">
+          <circle cx="12" cy="8" r="3.2" stroke="#5a6a72" strokeWidth="1.6" />
+          <path d="M5 20c1.2-3.6 4-5.4 7-5.4s5.8 1.8 7 5.4" stroke="#5a6a72" strokeWidth="1.6" strokeLinecap="round" />
+        </svg>
       </Link>
+
+      <StatusPicker email={email} status={myStatus} onChange={onChangeStatus} />
     </div>
   );
 }

@@ -1,6 +1,9 @@
 import json
 import math
 import re
+import hashlib
+import hmac
+import secrets
 from typing import List, Optional
 import xml.etree.ElementTree as ET
 from app.dive_log import parse_uddf, sample_at
@@ -32,7 +35,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from app.alerts import send_detection_alert
-from app.cloudinary_client import delete_clip, upload_clip, upload_snapshot
+from app.cloudinary_client import delete_clip, upload_clip, upload_snapshot, upload_chat_attachment
 from app.db import get_db, is_connected
 from app.inference import clahe_correct, coral_bleaching_ratio, predict_with_roboflow
 from app.obis_client import fetch_obis_species_data
@@ -42,7 +45,7 @@ from app.report_email import send_mission_report_email
 from app.species_info import get_species_info
 from app.telemetry import TelemetrySimulator, MISSION_LAT, MISSION_LNG
 from app.weight_estimate import estimate_weight_grams, fishbase_search_url
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import sys
@@ -840,7 +843,7 @@ async def dive_log_at(request: Request, dive_log_id: str, elapsed_seconds: float
 
 
 # ---------------------------------------------------------------------------
-# Team Workspace: channels, messages, presence
+# Team Workspace: channels, messages, presence, moderation
 #
 # Realtime is deliberately polling-based rather than a managed pub/sub
 # service (Pusher/Ably) — Vercel can't hold long-lived WebSocket
@@ -853,9 +856,25 @@ async def dive_log_at(request: Request, dive_log_id: str, elapsed_seconds: float
 # /snapshot): the frontend already gates access behind a NextAuth session,
 # so the backend takes the researcher's email as a plain field/param rather
 # than verifying a bearer token itself.
+#
+# Explicitly NOT built here: voice/video calling and calendar-based
+# meeting scheduling. Both need a real-time media provider (TURN/STUN,
+# signaling) that this free-tier stack doesn't have — that's an
+# infrastructure decision worth making deliberately, not something to
+# silently bolt on. Everything else on the punch list (manual presence
+# status, read receipts, file/voice attachments, replies, forwarding,
+# pinning, reporting, admin roles) is built below on existing free
+# infrastructure only.
 # ---------------------------------------------------------------------------
 
 PRESENCE_ONLINE_WINDOW_SECONDS = 60
+# Beyond this, a manually-set status (busy/away/offline) is treated as
+# stale rather than trusted forever — a laptop closed mid-"Busy" shouldn't
+# show a teammate as busy for the rest of the week.
+PRESENCE_STALE_SECONDS = 15 * 60
+VALID_MANUAL_STATUSES = {"active", "away", "busy", "offline"}
+VALID_ATTACHMENT_KINDS = {"file", "voice"}
+MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024  # 15MB — protects Cloudinary's 25 credits/month free-tier quota
 
 
 class ChannelCreateRequest(BaseModel):
@@ -870,8 +889,10 @@ class ChannelResponse(BaseModel):
     name: str
     type: str
     members: List[str]
+    admins: List[str]
     created_by: str
     created_at: str
+    unread_count: int = 0
 
 
 class ChannelMemberRequest(BaseModel):
@@ -879,10 +900,34 @@ class ChannelMemberRequest(BaseModel):
     added_by: str
 
 
+class ChannelAdminRequest(BaseModel):
+    email: str
+    requested_by: str
+
+
+class MessageAttachment(BaseModel):
+    url: str
+    name: str
+    kind: str = "file"  # "file" | "voice"
+    duration_seconds: Optional[float] = None
+
+
 class MessageCreateRequest(BaseModel):
     sender_email: str
+    text: str = ""
+    attachments: List[MessageAttachment] = []
+    reply_to: Optional[str] = None
+
+
+class ReplyPreview(BaseModel):
+    message_id: str
+    sender_email: str
     text: str
-    attachments: List[str] = []
+
+
+class ForwardedFrom(BaseModel):
+    channel_id: str
+    sender_email: str
 
 
 class MessageResponse(BaseModel):
@@ -890,28 +935,72 @@ class MessageResponse(BaseModel):
     channel_id: str
     sender_email: str
     text: str
-    attachments: List[str]
+    attachments: List[MessageAttachment]
     created_at: str
+    reply_to: Optional[str] = None
+    reply_preview: Optional[ReplyPreview] = None
+    pinned: bool = False
+    deleted: bool = False
+    forwarded_from: Optional[ForwardedFrom] = None
+
+
+class ForwardMessageRequest(BaseModel):
+    target_channel_id: str
+    forwarded_by: str
+
+
+class ReportMessageRequest(BaseModel):
+    reported_by: str
+    reason: str = ""
+
+
+class ReportResponse(BaseModel):
+    id: str
+    message_id: str
+    channel_id: str
+    reported_by: str
+    reason: str
+    created_at: str
+    resolved: bool
 
 
 class HeartbeatRequest(BaseModel):
     email: str
 
 
+class PresenceStatusRequest(BaseModel):
+    email: str
+    status: str  # "active" | "away" | "busy" | "offline"
+
+
 class PresenceEntry(BaseModel):
     email: str
     online: bool
+    status: str  # effective, displayable status honoring any manual override
     last_seen: Optional[str] = None
 
 
-def _channel_to_response(doc) -> ChannelResponse:
+class ReadReceiptRequest(BaseModel):
+    email: str
+
+
+class AttachmentUploadResponse(BaseModel):
+    url: str
+    name: str
+    kind: str
+    public_id: str
+
+
+def _channel_to_response(doc, unread_count: int = 0) -> ChannelResponse:
     return ChannelResponse(
         id=str(doc["_id"]),
         name=doc.get("name", "Untitled channel"),
         type=doc.get("type", "project"),
         members=doc.get("members", []),
+        admins=doc.get("admins", []),
         created_by=doc.get("created_by", ""),
         created_at=doc["created_at"].isoformat() if doc.get("created_at") else "",
+        unread_count=unread_count,
     )
 
 
@@ -926,12 +1015,86 @@ def _require_channel(db, channel_id: str):
     return oid, doc
 
 
+def _require_message(db, message_id: str):
+    try:
+        oid = ObjectId(message_id)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid message id")
+    doc = db["messages"].find_one({"_id": oid})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+    return oid, doc
+
+
+def _is_admin(channel_doc, email: str) -> bool:
+    return email == channel_doc.get("created_by") or email in channel_doc.get("admins", [])
+
+
+def _message_to_response(doc) -> MessageResponse:
+    reply_preview = doc.get("reply_preview")
+    forwarded_from = doc.get("forwarded_from")
+    return MessageResponse(
+        id=str(doc["_id"]),
+        channel_id=str(doc["channel_id"]),
+        sender_email=doc.get("sender_email", ""),
+        text="[deleted]" if doc.get("deleted") else doc.get("text", ""),
+        attachments=[] if doc.get("deleted") else [MessageAttachment(**a) for a in doc.get("attachments", [])],
+        created_at=doc["created_at"].isoformat() if doc.get("created_at") else "",
+        reply_to=str(doc["reply_to"]) if doc.get("reply_to") else None,
+        reply_preview=ReplyPreview(**reply_preview) if reply_preview else None,
+        pinned=doc.get("pinned", False),
+        deleted=doc.get("deleted", False),
+        forwarded_from=ForwardedFrom(**forwarded_from) if forwarded_from else None,
+    )
+
+
+def _unread_count(db, channel_id, member_email: str) -> int:
+    """Counts messages in this channel newer than the member's last read
+    marker, excluding their own messages (you don't need to be told you
+    have unread copies of what you just said). Best-effort — any query
+    failure just reports 0 rather than breaking the channel list."""
+    try:
+        read_doc = db["channel_reads"].find_one({"channel_id": channel_id, "email": member_email})
+        query = {"channel_id": channel_id, "sender_email": {"$ne": member_email}, "deleted": {"$ne": True}}
+        if read_doc and read_doc.get("last_read_at"):
+            query["created_at"] = {"$gt": read_doc["last_read_at"]}
+        return db["messages"].count_documents(query)
+    except Exception as exc:
+        print(f"[workspace] Unread count failed for {member_email} in {channel_id}: {exc}")
+        return 0
+
+
+def _compute_presence(doc, now):
+    """Blends heartbeat-derived online/offline with an optional manual
+    override (active/away/busy/offline). A manual override older than
+    PRESENCE_STALE_SECONDS is treated as abandoned rather than trusted
+    forever."""
+    last_seen = doc.get("last_seen") if doc else None
+    manual_status = doc.get("manual_status") if doc else None
+
+    if last_seen is None:
+        return False, "offline"
+
+    age_seconds = (now - last_seen).total_seconds()
+    online = age_seconds < PRESENCE_ONLINE_WINDOW_SECONDS
+
+    if age_seconds > PRESENCE_STALE_SECONDS:
+        return False, "offline"
+
+    if manual_status in ("busy", "away"):
+        return online, manual_status
+    if manual_status == "offline":
+        return online, "offline"
+
+    return online, ("active" if online else "offline")
+
+
 @app.post("/channels", response_model=ChannelResponse)
 @limiter.limit("10/minute")
 async def create_channel(request: Request, payload: ChannelCreateRequest):
     """Creates a channel and folds the creator into the member list even if
-    they forgot to include themselves — a channel its own creator can't see
-    is a bug, not an edge case worth erroring over."""
+    they forgot to include themselves. The creator is always an admin —
+    every channel needs at least one person who can moderate it."""
     db = get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Team workspace is unavailable right now (database not connected)")
@@ -941,6 +1104,7 @@ async def create_channel(request: Request, payload: ChannelCreateRequest):
         "name": payload.name,
         "type": payload.type,
         "members": members,
+        "admins": [payload.created_by],
         "created_by": payload.created_by,
         "created_at": datetime.now(timezone.utc),
     }
@@ -952,9 +1116,8 @@ async def create_channel(request: Request, payload: ChannelCreateRequest):
 @app.get("/channels", response_model=List[ChannelResponse])
 @limiter.limit("60/minute")
 async def list_channels(request: Request, member_email: str):
-    """Every channel the given researcher belongs to. No member_email, no
-    list — there's no "browse all channels" mode, matching how a Teams
-    sidebar only ever shows what you're already in."""
+    """Every channel the given researcher belongs to, with an unread
+    count per channel."""
     if not member_email:
         raise HTTPException(status_code=400, detail="member_email is required")
 
@@ -963,7 +1126,10 @@ async def list_channels(request: Request, member_email: str):
         return []  # Degrade to an empty workspace rather than erroring the whole page
 
     docs = db["channels"].find({"members": member_email}).sort("created_at", 1).limit(200)
-    return [_channel_to_response(doc) for doc in docs]
+    return [
+        _channel_to_response(doc, unread_count=_unread_count(db, doc["_id"], member_email))
+        for doc in docs
+    ]
 
 
 @app.post("/channels/{channel_id}/members", response_model=ChannelResponse)
@@ -984,6 +1150,136 @@ async def add_channel_member(request: Request, channel_id: str, payload: Channel
     return _channel_to_response(doc)
 
 
+@app.delete("/channels/{channel_id}/members/{email}", response_model=ChannelResponse)
+@limiter.limit("20/minute")
+async def remove_channel_member(request: Request, channel_id: str, email: str, requested_by: str):
+    """Admin-only. The channel's original creator can't be removed this
+    way — demote/transfer isn't built, so removing them would leave a
+    channel with no way to be moderated."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    oid, doc = _require_channel(db, channel_id)
+    if not _is_admin(doc, requested_by):
+        raise HTTPException(status_code=403, detail="Only a channel admin can remove members")
+    if email == doc.get("created_by"):
+        raise HTTPException(status_code=400, detail="The channel creator can't be removed")
+
+    db["channels"].update_one({"_id": oid}, {"$pull": {"members": email, "admins": email}})
+    doc = db["channels"].find_one({"_id": oid})
+    return _channel_to_response(doc)
+
+
+@app.post("/channels/{channel_id}/admins", response_model=ChannelResponse)
+@limiter.limit("20/minute")
+async def promote_channel_admin(request: Request, channel_id: str, payload: ChannelAdminRequest):
+    """Admin-only. Promoting someone who isn't yet a member first adds
+    them as one — an admin who isn't a member of their own channel would
+    be a strange state to allow."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    oid, doc = _require_channel(db, channel_id)
+    if not _is_admin(doc, payload.requested_by):
+        raise HTTPException(status_code=403, detail="Only a channel admin can promote another admin")
+
+    db["channels"].update_one(
+        {"_id": oid},
+        {"$addToSet": {"members": payload.email, "admins": payload.email}},
+    )
+    doc = db["channels"].find_one({"_id": oid})
+    return _channel_to_response(doc)
+
+
+@app.delete("/channels/{channel_id}/admins/{email}", response_model=ChannelResponse)
+@limiter.limit("20/minute")
+async def demote_channel_admin(request: Request, channel_id: str, email: str, requested_by: str):
+    """Admin-only. The creator can't be demoted, for the same reason they
+    can't be removed as a member."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    oid, doc = _require_channel(db, channel_id)
+    if not _is_admin(doc, requested_by):
+        raise HTTPException(status_code=403, detail="Only a channel admin can demote another admin")
+    if email == doc.get("created_by"):
+        raise HTTPException(status_code=400, detail="The channel creator can't be demoted")
+
+    db["channels"].update_one({"_id": oid}, {"$pull": {"admins": email}})
+    doc = db["channels"].find_one({"_id": oid})
+    return _channel_to_response(doc)
+
+
+@app.post("/channels/{channel_id}/read")
+@limiter.limit("120/minute")
+async def mark_channel_read(request: Request, channel_id: str, payload: ReadReceiptRequest):
+    """The frontend calls this whenever a channel is actually in view
+    (e.g. on open and periodically while active), marking everything up
+    to now as read for that researcher."""
+    db = get_db()
+    if db is None:
+        return {"ok": False}
+
+    oid, doc = _require_channel(db, channel_id)
+    if payload.email not in doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can mark it read")
+
+    db["channel_reads"].update_one(
+        {"channel_id": oid, "email": payload.email},
+        {"$set": {"channel_id": oid, "email": payload.email, "last_read_at": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+@app.post("/channels/{channel_id}/attachments", response_model=AttachmentUploadResponse)
+@limiter.limit("20/minute")
+async def upload_channel_attachment(
+    request: Request,
+    channel_id: str,
+    file: UploadFile = File(...),
+    uploader_email: str = Form(...),
+    kind: str = Form("file"),
+):
+    """Uploads a file share or a recorded voice message (same endpoint —
+    kind distinguishes how the frontend renders it) to Cloudinary, then
+    returns the URL to attach to a message via POST .../messages.
+    Deliberately a separate step from posting the message itself, mirroring
+    the existing Discovery Snapshot upload-then-log pattern."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    oid, doc = _require_channel(db, channel_id)
+    if uploader_email not in doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can upload attachments")
+
+    if kind not in VALID_ATTACHMENT_KINDS:
+        kind = "file"
+
+    raw_bytes = await file.read()
+    if len(raw_bytes) > MAX_ATTACHMENT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail="Attachments are capped at 15MB to protect the shared Cloudinary free-tier quota",
+        )
+
+    try:
+        upload_result = upload_chat_attachment(raw_bytes, filename=file.filename or "attachment")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Cloudinary upload failed: {exc}")
+
+    return AttachmentUploadResponse(
+        url=upload_result["url"],
+        name=file.filename or "attachment",
+        kind=kind,
+        public_id=upload_result["public_id"],
+    )
+
+
 @app.post("/channels/{channel_id}/messages", response_model=MessageResponse)
 @limiter.limit("60/minute")
 async def post_message(request: Request, channel_id: str, payload: MessageCreateRequest):
@@ -997,23 +1293,40 @@ async def post_message(request: Request, channel_id: str, payload: MessageCreate
     if not payload.text.strip() and not payload.attachments:
         raise HTTPException(status_code=400, detail="Message needs text or an attachment")
 
+    reply_preview = None
+    reply_to_oid = None
+    if payload.reply_to:
+        try:
+            reply_to_oid = ObjectId(payload.reply_to)
+        except InvalidId:
+            raise HTTPException(status_code=400, detail="Invalid reply_to id")
+        replied = db["messages"].find_one({"_id": reply_to_oid, "channel_id": oid})
+        if replied is None:
+            raise HTTPException(status_code=404, detail="The message being replied to no longer exists")
+        # Snapshot the replied-to sender/text at send time, so rendering a
+        # reply never needs a second lookup (and still reads fine even if
+        # the original is later deleted).
+        reply_preview = {
+            "message_id": str(replied["_id"]),
+            "sender_email": replied.get("sender_email", ""),
+            "text": "[deleted]" if replied.get("deleted") else replied.get("text", "")[:200],
+        }
+
     record = {
         "channel_id": oid,
         "sender_email": payload.sender_email,
         "text": payload.text,
-        "attachments": payload.attachments,
+        "attachments": [a.model_dump() for a in payload.attachments],
         "created_at": datetime.now(timezone.utc),
+        "reply_to": reply_to_oid,
+        "reply_preview": reply_preview,
+        "pinned": False,
+        "deleted": False,
+        "forwarded_from": None,
     }
     result = db["messages"].insert_one(record)
-
-    return MessageResponse(
-        id=str(result.inserted_id),
-        channel_id=channel_id,
-        sender_email=record["sender_email"],
-        text=record["text"],
-        attachments=record["attachments"],
-        created_at=record["created_at"].isoformat(),
-    )
+    record["_id"] = result.inserted_id
+    return _message_to_response(record)
 
 
 @app.get("/channels/{channel_id}/messages", response_model=List[MessageResponse])
@@ -1028,7 +1341,10 @@ async def list_messages(
     """The polling endpoint the frontend hits every few seconds while a
     channel is open. Pass `since` (an ISO timestamp, normally the
     created_at of the last message already rendered) to fetch only what's
-    new since the last poll instead of re-fetching the whole history."""
+    new since the last poll instead of re-fetching the whole history.
+    Deleted messages are still returned (as a "[deleted]" tombstone) so a
+    reply chain or forward that references one doesn't break — moderation
+    here is disclosed, not silently erased."""
     db = get_db()
     if db is None:
         return []  # Degrade to an empty channel rather than erroring the whole page
@@ -1046,30 +1362,231 @@ async def list_messages(
             raise HTTPException(status_code=400, detail="since must be an ISO timestamp")
 
     docs = db["messages"].find(query).sort("created_at", 1).limit(min(limit, 500))
+    return [_message_to_response(m) for m in docs]
+
+
+@app.delete("/messages/{message_id}")
+@limiter.limit("30/minute")
+async def delete_message(request: Request, message_id: str, requested_by: str):
+    """Soft delete only — the sender or a channel admin can remove a
+    message's content, but the record stays (as a tombstone) so reply
+    chains, forwards, and moderation history all stay coherent. This
+    mirrors the ownership-checked delete pattern already used for clips."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    m_oid, m_doc = _require_message(db, message_id)
+    _, channel_doc = _require_channel(db, str(m_doc["channel_id"]))
+
+    if requested_by != m_doc.get("sender_email") and not _is_admin(channel_doc, requested_by):
+        raise HTTPException(status_code=403, detail="Only the sender or a channel admin can delete this message")
+
+    db["messages"].update_one({"_id": m_oid}, {"$set": {"deleted": True, "pinned": False}})
+    return {"deleted": True}
+
+
+@app.post("/messages/{message_id}/pin", response_model=MessageResponse)
+@limiter.limit("30/minute")
+async def pin_message(request: Request, message_id: str, requested_by: str):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    m_oid, m_doc = _require_message(db, message_id)
+    _, channel_doc = _require_channel(db, str(m_doc["channel_id"]))
+    if requested_by not in channel_doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can pin a message")
+    if m_doc.get("deleted"):
+        raise HTTPException(status_code=400, detail="Can't pin a deleted message")
+
+    db["messages"].update_one({"_id": m_oid}, {"$set": {"pinned": True}})
+    m_doc = db["messages"].find_one({"_id": m_oid})
+    return _message_to_response(m_doc)
+
+
+@app.post("/messages/{message_id}/unpin", response_model=MessageResponse)
+@limiter.limit("30/minute")
+async def unpin_message(request: Request, message_id: str, requested_by: str):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    m_oid, m_doc = _require_message(db, message_id)
+    _, channel_doc = _require_channel(db, str(m_doc["channel_id"]))
+    if requested_by not in channel_doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can unpin a message")
+
+    db["messages"].update_one({"_id": m_oid}, {"$set": {"pinned": False}})
+    m_doc = db["messages"].find_one({"_id": m_oid})
+    return _message_to_response(m_doc)
+
+
+@app.get("/channels/{channel_id}/pinned-messages", response_model=List[MessageResponse])
+@limiter.limit("60/minute")
+async def list_pinned_messages(request: Request, channel_id: str, requester_email: str):
+    db = get_db()
+    if db is None:
+        return []
+
+    oid, doc = _require_channel(db, channel_id)
+    if requester_email not in doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can view pinned messages")
+
+    docs = db["messages"].find({"channel_id": oid, "pinned": True}).sort("created_at", -1).limit(50)
+    return [_message_to_response(m) for m in docs]
+
+
+@app.post("/messages/{message_id}/forward", response_model=MessageResponse)
+@limiter.limit("30/minute")
+async def forward_message(request: Request, message_id: str, payload: ForwardMessageRequest):
+    """Copies a message's content into another channel. The requester must
+    be a member of both the source and target channel — forwarding
+    shouldn't be a way to leak a private channel's content into one you
+    don't actually belong to, or to inject a message into a channel you're
+    not part of."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    m_oid, m_doc = _require_message(db, message_id)
+    if m_doc.get("deleted"):
+        raise HTTPException(status_code=400, detail="Can't forward a deleted message")
+
+    _, source_channel = _require_channel(db, str(m_doc["channel_id"]))
+    if payload.forwarded_by not in source_channel.get("members", []):
+        raise HTTPException(status_code=403, detail="You're not a member of the source channel")
+
+    target_oid, target_channel = _require_channel(db, payload.target_channel_id)
+    if payload.forwarded_by not in target_channel.get("members", []):
+        raise HTTPException(status_code=403, detail="You're not a member of the target channel")
+
+    record = {
+        "channel_id": target_oid,
+        "sender_email": payload.forwarded_by,
+        "text": m_doc.get("text", ""),
+        "attachments": m_doc.get("attachments", []),
+        "created_at": datetime.now(timezone.utc),
+        "reply_to": None,
+        "reply_preview": None,
+        "pinned": False,
+        "deleted": False,
+        "forwarded_from": {
+            "channel_id": str(m_doc["channel_id"]),
+            "sender_email": m_doc.get("sender_email", ""),
+        },
+    }
+    result = db["messages"].insert_one(record)
+    record["_id"] = result.inserted_id
+    return _message_to_response(record)
+
+
+@app.post("/messages/{message_id}/report", response_model=ReportResponse)
+@limiter.limit("20/minute")
+async def report_message(request: Request, message_id: str, payload: ReportMessageRequest):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    m_oid, m_doc = _require_message(db, message_id)
+    _, channel_doc = _require_channel(db, str(m_doc["channel_id"]))
+    if payload.reported_by not in channel_doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can report a message")
+
+    record = {
+        "message_id": m_oid,
+        "channel_id": m_doc["channel_id"],
+        "reported_by": payload.reported_by,
+        "reason": payload.reason,
+        "created_at": datetime.now(timezone.utc),
+        "resolved": False,
+    }
+    result = db["reports"].insert_one(record)
+    return ReportResponse(
+        id=str(result.inserted_id),
+        message_id=str(m_oid),
+        channel_id=str(m_doc["channel_id"]),
+        reported_by=payload.reported_by,
+        reason=payload.reason,
+        created_at=record["created_at"].isoformat(),
+        resolved=False,
+    )
+
+
+@app.get("/channels/{channel_id}/reports", response_model=List[ReportResponse])
+@limiter.limit("30/minute")
+async def list_channel_reports(request: Request, channel_id: str, requester_email: str):
+    """Admin-only — reports are a moderation tool, not something every
+    member browses."""
+    db = get_db()
+    if db is None:
+        return []
+
+    oid, doc = _require_channel(db, channel_id)
+    if not _is_admin(doc, requester_email):
+        raise HTTPException(status_code=403, detail="Only a channel admin can view reports")
+
+    docs = db["reports"].find({"channel_id": oid}).sort("created_at", -1).limit(200)
     return [
-        MessageResponse(
-            id=str(m["_id"]),
-            channel_id=str(m["channel_id"]),
-            sender_email=m.get("sender_email", ""),
-            text=m.get("text", ""),
-            attachments=m.get("attachments", []),
-            created_at=m["created_at"].isoformat() if m.get("created_at") else "",
+        ReportResponse(
+            id=str(r["_id"]),
+            message_id=str(r["message_id"]),
+            channel_id=str(r["channel_id"]),
+            reported_by=r.get("reported_by", ""),
+            reason=r.get("reason", ""),
+            created_at=r["created_at"].isoformat() if r.get("created_at") else "",
+            resolved=r.get("resolved", False),
         )
-        for m in docs
+        for r in docs
     ]
+
+
+@app.post("/reports/{report_id}/resolve", response_model=ReportResponse)
+@limiter.limit("30/minute")
+async def resolve_report(request: Request, report_id: str, requested_by: str, action: str = "dismiss"):
+    """Admin-only. action="dismiss" just closes the report; action=
+    "delete_message" also soft-deletes the reported message."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    try:
+        r_oid = ObjectId(report_id)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid report id")
+    report_doc = db["reports"].find_one({"_id": r_oid})
+    if report_doc is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    _, channel_doc = _require_channel(db, str(report_doc["channel_id"]))
+    if not _is_admin(channel_doc, requested_by):
+        raise HTTPException(status_code=403, detail="Only a channel admin can resolve a report")
+
+    if action == "delete_message":
+        db["messages"].update_one({"_id": report_doc["message_id"]}, {"$set": {"deleted": True, "pinned": False}})
+
+    db["reports"].update_one({"_id": r_oid}, {"$set": {"resolved": True}})
+    report_doc = db["reports"].find_one({"_id": r_oid})
+    return ReportResponse(
+        id=str(report_doc["_id"]),
+        message_id=str(report_doc["message_id"]),
+        channel_id=str(report_doc["channel_id"]),
+        reported_by=report_doc.get("reported_by", ""),
+        reason=report_doc.get("reason", ""),
+        created_at=report_doc["created_at"].isoformat() if report_doc.get("created_at") else "",
+        resolved=report_doc.get("resolved", False),
+    )
 
 
 @app.post("/presence/heartbeat")
 @limiter.limit("120/minute")
 async def presence_heartbeat(request: Request, payload: HeartbeatRequest):
     """Fire-and-forget ping the frontend sends every ~30s while a
-    researcher has the workspace open in an active tab. Deliberately not
-    persisted as history — just the single latest lastSeen per email,
-    upserted in place."""
+    researcher has the workspace open in an active tab. Only touches
+    last_seen — never overwrites a manually-set status, so setting
+    yourself to "Busy" doesn't get silently reset by the next heartbeat."""
     db = get_db()
     if db is None:
-        # Presence is a nice-to-have, not core data — don't error the tab
-        # over it just because the DB is briefly down.
         return {"ok": False}
 
     db["presence"].update_one(
@@ -1080,32 +1597,284 @@ async def presence_heartbeat(request: Request, payload: HeartbeatRequest):
     return {"ok": True}
 
 
+@app.post("/presence/status")
+@limiter.limit("30/minute")
+async def set_presence_status(request: Request, payload: PresenceStatusRequest):
+    """Manually setting a status (Active/Away/Busy/Offline) — the Slack/
+    Teams-style override on top of heartbeat-derived online/offline."""
+    if payload.status not in VALID_MANUAL_STATUSES:
+        raise HTTPException(status_code=400, detail=f"status must be one of {sorted(VALID_MANUAL_STATUSES)}")
+
+    db = get_db()
+    if db is None:
+        return {"ok": False}
+
+    db["presence"].update_one(
+        {"email": payload.email},
+        {
+            "$set": {
+                "email": payload.email,
+                "manual_status": payload.status,
+                "last_seen": datetime.now(timezone.utc),
+            }
+        },
+        upsert=True,
+    )
+    return {"ok": True}
+
+
 @app.get("/presence", response_model=List[PresenceEntry])
 @limiter.limit("120/minute")
 async def get_presence(request: Request, emails: str):
     """emails is a comma-separated list, e.g. from a channel's member
-    list. Anyone whose last heartbeat was within the online window is
-    reported online; anyone with no heartbeat on record at all is reported
-    offline with no last_seen rather than omitted, so the frontend can
-    still render them in the member list."""
+    list. Anyone with no heartbeat on record at all is reported offline
+    with no last_seen rather than omitted, so the frontend can still
+    render them in the member list."""
     requested = [e.strip() for e in emails.split(",") if e.strip()]
     if not requested:
         return []
 
     db = get_db()
+    now = datetime.now(timezone.utc)
     if db is None:
-        return [PresenceEntry(email=e, online=False, last_seen=None) for e in requested]
+        return [PresenceEntry(email=e, online=False, status="offline", last_seen=None) for e in requested]
 
     docs = {d["email"]: d for d in db["presence"].find({"email": {"$in": requested}})}
-    now = datetime.now(timezone.utc)
 
     results = []
     for email in requested:
         doc = docs.get(email)
-        if doc is None:
-            results.append(PresenceEntry(email=email, online=False, last_seen=None))
-            continue
-        last_seen = doc["last_seen"]
-        online = (now - last_seen).total_seconds() < PRESENCE_ONLINE_WINDOW_SECONDS
-        results.append(PresenceEntry(email=email, online=online, last_seen=last_seen.isoformat()))
+        online, status = _compute_presence(doc, now)
+        last_seen = doc.get("last_seen") if doc else None
+        results.append(
+            PresenceEntry(
+                email=email,
+                online=online,
+                status=status,
+                last_seen=last_seen.isoformat() if last_seen else None,
+            )
+        )
     return results
+
+
+# ---------------------------------------------------------------------------
+# Calls & Meetings — built on meet.jit.si, the free public Jitsi Meet
+# instance: no account, no card, no per-minute metering, no time limit,
+# open source. This backend never talks to Jitsi directly — it only hands
+# the frontend a room name and lets the browser embed Jitsi's own IFrame
+# API (loaded from meet.jit.si), so there's no signaling/TURN/STUN
+# infrastructure for Telesto to run or pay for.
+#
+# Room names are HMAC'd from the channel id using the same
+# INTERNAL_SYNC_SECRET already configured for the GitHub Actions species
+# sync, rather than a raw/guessable slug — meet.jit.si rooms have no
+# access control of their own, so an unguessable name is the only thing
+# standing between "private team call" and "anyone who finds the URL".
+# Scheduled meetings get their own one-off room per meeting for the same
+# reason.
+#
+# Calendar integration is a downloadable .ics file, not a Google/Outlook
+# API integration — zero OAuth, zero new credentials, and it works with
+# every calendar app that exists.
+# ---------------------------------------------------------------------------
+
+
+def _call_room_for_channel(channel_id: str) -> str:
+    """Stable, non-guessable Jitsi room name for a channel's persistent
+    "start/join a call" room — same channel always maps to the same room,
+    so anyone clicking "Join call" lands in the same place."""
+    digest = hmac.new(INTERNAL_SYNC_SECRET.encode(), channel_id.encode(), hashlib.sha256).hexdigest()
+    return f"telesto-node-{digest[:20]}"
+
+
+def _build_ics(meeting_doc) -> str:
+    """Hand-rolled minimal RFC 5545 VEVENT — one dependency-free function
+    beats pulling in a calendar library for a single event type."""
+    def fmt(dt):
+        return dt.strftime("%Y%m%dT%H%M%SZ")
+
+    start = meeting_doc["scheduled_at"]
+    end = start + timedelta(minutes=meeting_doc.get("duration_minutes", 30))
+    join_url = f"https://meet.jit.si/{meeting_doc['jitsi_room']}"
+    description = f"Join: {join_url}".replace(",", "\\,")
+    summary = meeting_doc.get("title", "Telesto Node meeting").replace(",", "\\,")
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//Telesto Node//Team Workspace//EN",
+        "BEGIN:VEVENT",
+        f"UID:{meeting_doc['_id']}@telesto-node",
+        f"DTSTAMP:{fmt(datetime.now(timezone.utc))}",
+        f"DTSTART:{fmt(start)}",
+        f"DTEND:{fmt(end)}",
+        f"SUMMARY:{summary}",
+        f"DESCRIPTION:{description}",
+        f"URL:{join_url}",
+        "END:VEVENT",
+        "END:VCALENDAR",
+    ]
+    return "\r\n".join(lines)
+
+
+class CallRoomResponse(BaseModel):
+    room: str
+    join_url: str
+
+
+class MeetingCreateRequest(BaseModel):
+    title: str
+    scheduled_at: str  # ISO timestamp
+    duration_minutes: int = 30
+    created_by: str
+    attendee_emails: List[str] = []  # empty = every current channel member
+
+
+class MeetingResponse(BaseModel):
+    id: str
+    channel_id: str
+    title: str
+    scheduled_at: str
+    duration_minutes: int
+    created_by: str
+    attendees: List[str]
+    jitsi_room: str
+    join_url: str
+    created_at: str
+
+
+def _meeting_to_response(doc) -> MeetingResponse:
+    return MeetingResponse(
+        id=str(doc["_id"]),
+        channel_id=str(doc["channel_id"]),
+        title=doc.get("title", "Untitled meeting"),
+        scheduled_at=doc["scheduled_at"].isoformat() if doc.get("scheduled_at") else "",
+        duration_minutes=doc.get("duration_minutes", 30),
+        created_by=doc.get("created_by", ""),
+        attendees=doc.get("attendees", []),
+        jitsi_room=doc.get("jitsi_room", ""),
+        join_url=f"https://meet.jit.si/{doc.get('jitsi_room', '')}",
+        created_at=doc["created_at"].isoformat() if doc.get("created_at") else "",
+    )
+
+
+@app.get("/channels/{channel_id}/call-room", response_model=CallRoomResponse)
+@limiter.limit("60/minute")
+async def get_call_room(request: Request, channel_id: str, requester_email: str):
+    """The persistent ad-hoc room for this channel — every member always
+    gets the same room name back, so "Start a call" and "Join call" are
+    the same button for everyone."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    _, doc = _require_channel(db, channel_id)
+    if requester_email not in doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can start or join a call here")
+
+    room = _call_room_for_channel(channel_id)
+    return CallRoomResponse(room=room, join_url=f"https://meet.jit.si/{room}")
+
+
+@app.post("/channels/{channel_id}/meetings", response_model=MeetingResponse)
+@limiter.limit("20/minute")
+async def create_meeting(request: Request, channel_id: str, payload: MeetingCreateRequest):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    oid, doc = _require_channel(db, channel_id)
+    if payload.created_by not in doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can schedule a meeting")
+
+    try:
+        scheduled_at = datetime.fromisoformat(payload.scheduled_at.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="scheduled_at must be an ISO timestamp")
+
+    attendees = payload.attendee_emails or doc.get("members", [])
+    # Each meeting gets its own unguessable room, separate from the
+    # channel's persistent ad-hoc call room.
+    jitsi_room = f"telesto-node-{secrets.token_urlsafe(9)}"
+
+    record = {
+        "channel_id": oid,
+        "title": payload.title,
+        "scheduled_at": scheduled_at,
+        "duration_minutes": payload.duration_minutes,
+        "created_by": payload.created_by,
+        "attendees": attendees,
+        "jitsi_room": jitsi_room,
+        "created_at": datetime.now(timezone.utc),
+    }
+    result = db["meetings"].insert_one(record)
+    record["_id"] = result.inserted_id
+    return _meeting_to_response(record)
+
+
+@app.get("/channels/{channel_id}/meetings", response_model=List[MeetingResponse])
+@limiter.limit("60/minute")
+async def list_meetings(request: Request, channel_id: str, requester_email: str):
+    db = get_db()
+    if db is None:
+        return []
+
+    oid, doc = _require_channel(db, channel_id)
+    if requester_email not in doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can view this channel's meetings")
+
+    docs = db["meetings"].find({"channel_id": oid}).sort("scheduled_at", 1).limit(200)
+    return [_meeting_to_response(m) for m in docs]
+
+
+@app.delete("/meetings/{meeting_id}")
+@limiter.limit("20/minute")
+async def cancel_meeting(request: Request, meeting_id: str, requested_by: str):
+    """The meeting's creator or a channel admin can cancel it."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    try:
+        m_oid = ObjectId(meeting_id)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid meeting id")
+    meeting_doc = db["meetings"].find_one({"_id": m_oid})
+    if meeting_doc is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    _, channel_doc = _require_channel(db, str(meeting_doc["channel_id"]))
+    if requested_by != meeting_doc.get("created_by") and not _is_admin(channel_doc, requested_by):
+        raise HTTPException(status_code=403, detail="Only the organizer or a channel admin can cancel this meeting")
+
+    db["meetings"].delete_one({"_id": m_oid})
+    return {"deleted": True}
+
+
+@app.get("/meetings/{meeting_id}/ics")
+@limiter.limit("30/minute")
+async def download_meeting_ics(request: Request, meeting_id: str, requester_email: str):
+    """A plain .ics file — no Google/Outlook API, no OAuth. Works with
+    every calendar app; the researcher imports it themselves."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    try:
+        m_oid = ObjectId(meeting_id)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid meeting id")
+    meeting_doc = db["meetings"].find_one({"_id": m_oid})
+    if meeting_doc is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    _, channel_doc = _require_channel(db, str(meeting_doc["channel_id"]))
+    if requester_email not in channel_doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can download this invite")
+
+    ics_body = _build_ics(meeting_doc)
+    return Response(
+        content=ics_body,
+        media_type="text/calendar",
+        headers={"Content-Disposition": f'attachment; filename="{meeting_doc.get("title", "meeting")}.ics"'},
+    )

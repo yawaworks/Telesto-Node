@@ -1,7 +1,18 @@
 "use client";
 
+const STATUS_PRIORITY = ["active", "busy", "away"]; // most "present" wins for the channel-row summary dot
+const STATUS_COLORS = { active: "#7fb37f", busy: "#c47a6e", away: "#a48a55" };
+
+function channelSummaryColor(channel, presence) {
+  for (const status of STATUS_PRIORITY) {
+    const anyMatch = (channel.members || []).some((email) => presence[email]?.status === status);
+    if (anyMatch) return STATUS_COLORS[status];
+  }
+  return "#3a444a"; // everyone offline
+}
+
 function ChannelRow({ channel, active, presence, onSelect }) {
-  const anyOnline = (channel.members || []).some((email) => presence[email]?.online);
+  const dotColor = channelSummaryColor(channel, presence);
 
   return (
     <button
@@ -16,10 +27,12 @@ function ChannelRow({ channel, active, presence, onSelect }) {
       )}
       <span className="text-[#5a6a72] font-bold">#</span>
       <span className="truncate flex-1">{channel.name}</span>
-      <span
-        className={`w-1.5 h-1.5 rounded-full shrink-0 ${anyOnline ? "bg-[#7fb37f]" : "bg-[#3a444a]"}`}
-        title={anyOnline ? "A teammate is online" : "No one online right now"}
-      />
+      {channel.unread_count > 0 && (
+        <span className="shrink-0 min-w-[18px] h-[18px] px-1 rounded-full bg-[#8fa3ad] text-[#12161a] text-[10px] font-bold flex items-center justify-center">
+          {channel.unread_count > 99 ? "99+" : channel.unread_count}
+        </span>
+      )}
+      <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: dotColor }} />
     </button>
   );
 }

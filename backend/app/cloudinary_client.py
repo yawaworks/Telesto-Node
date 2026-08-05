@@ -64,3 +64,26 @@ def delete_snapshot(public_id: str) -> bool:
     """Permanently removes a Discovery Snapshot image from Cloudinary."""
     result = cloudinary.uploader.destroy(public_id, resource_type="image")
     return result.get("result") == "ok"
+
+
+def upload_chat_attachment(file_bytes: bytes, filename: str = "attachment") -> dict:
+    """Uploads a Team Workspace chat attachment (file share or a recorded
+    voice message) to its own Cloudinary folder. resource_type="auto" lets
+    Cloudinary detect image/video/audio/raw itself, since chat attachments
+    can be any of those, unlike the single-purpose snapshot/clip uploads
+    above."""
+    result = cloudinary.uploader.upload(
+        file_bytes,
+        folder="telesto-node/chat-attachments",
+        resource_type="auto",
+        filename=filename,
+        use_filename=True,
+        unique_filename=True,
+        overwrite=False,
+    )
+    return {
+        "url": result.get("secure_url"),
+        "public_id": result.get("public_id"),
+        "resource_type": result.get("resource_type"),
+        "bytes": result.get("bytes"),
+    }
