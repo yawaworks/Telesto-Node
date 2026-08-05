@@ -837,3 +837,275 @@ async def dive_log_at(request: Request, dive_log_id: str, elapsed_seconds: float
     if sample is None:
         raise HTTPException(status_code=404, detail="No samples in this log")
     return {"depth_m": sample.get("depth_m"), "temp_c": sample.get("temp_c"), "source": "dive_log"}
+
+
+# ---------------------------------------------------------------------------
+# Team Workspace: channels, messages, presence
+#
+# Realtime is deliberately polling-based rather than a managed pub/sub
+# service (Pusher/Ably) — Vercel can't hold long-lived WebSocket
+# connections and this backend is already up 24/7 for free on Render, so
+# there's no reason to add a paid third-party dependency just for a small
+# research team's chat. The frontend polls GET /channels/{id}/messages on
+# an interval and pings POST /presence/heartbeat periodically instead.
+#
+# Auth follows the same trust model as the rest of this API (see /clips,
+# /snapshot): the frontend already gates access behind a NextAuth session,
+# so the backend takes the researcher's email as a plain field/param rather
+# than verifying a bearer token itself.
+# ---------------------------------------------------------------------------
+
+PRESENCE_ONLINE_WINDOW_SECONDS = 60
+
+
+class ChannelCreateRequest(BaseModel):
+    name: str
+    type: str = "project"  # "project" | "general"
+    member_emails: List[str] = []
+    created_by: str
+
+
+class ChannelResponse(BaseModel):
+    id: str
+    name: str
+    type: str
+    members: List[str]
+    created_by: str
+    created_at: str
+
+
+class ChannelMemberRequest(BaseModel):
+    email: str
+    added_by: str
+
+
+class MessageCreateRequest(BaseModel):
+    sender_email: str
+    text: str
+    attachments: List[str] = []
+
+
+class MessageResponse(BaseModel):
+    id: str
+    channel_id: str
+    sender_email: str
+    text: str
+    attachments: List[str]
+    created_at: str
+
+
+class HeartbeatRequest(BaseModel):
+    email: str
+
+
+class PresenceEntry(BaseModel):
+    email: str
+    online: bool
+    last_seen: Optional[str] = None
+
+
+def _channel_to_response(doc) -> ChannelResponse:
+    return ChannelResponse(
+        id=str(doc["_id"]),
+        name=doc.get("name", "Untitled channel"),
+        type=doc.get("type", "project"),
+        members=doc.get("members", []),
+        created_by=doc.get("created_by", ""),
+        created_at=doc["created_at"].isoformat() if doc.get("created_at") else "",
+    )
+
+
+def _require_channel(db, channel_id: str):
+    try:
+        oid = ObjectId(channel_id)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid channel id")
+    doc = db["channels"].find_one({"_id": oid})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    return oid, doc
+
+
+@app.post("/channels", response_model=ChannelResponse)
+@limiter.limit("10/minute")
+async def create_channel(request: Request, payload: ChannelCreateRequest):
+    """Creates a channel and folds the creator into the member list even if
+    they forgot to include themselves — a channel its own creator can't see
+    is a bug, not an edge case worth erroring over."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now (database not connected)")
+
+    members = list(dict.fromkeys([*payload.member_emails, payload.created_by]))  # de-duped, order-preserved
+    record = {
+        "name": payload.name,
+        "type": payload.type,
+        "members": members,
+        "created_by": payload.created_by,
+        "created_at": datetime.now(timezone.utc),
+    }
+    result = db["channels"].insert_one(record)
+    record["_id"] = result.inserted_id
+    return _channel_to_response(record)
+
+
+@app.get("/channels", response_model=List[ChannelResponse])
+@limiter.limit("60/minute")
+async def list_channels(request: Request, member_email: str):
+    """Every channel the given researcher belongs to. No member_email, no
+    list — there's no "browse all channels" mode, matching how a Teams
+    sidebar only ever shows what you're already in."""
+    if not member_email:
+        raise HTTPException(status_code=400, detail="member_email is required")
+
+    db = get_db()
+    if db is None:
+        return []  # Degrade to an empty workspace rather than erroring the whole page
+
+    docs = db["channels"].find({"members": member_email}).sort("created_at", 1).limit(200)
+    return [_channel_to_response(doc) for doc in docs]
+
+
+@app.post("/channels/{channel_id}/members", response_model=ChannelResponse)
+@limiter.limit("20/minute")
+async def add_channel_member(request: Request, channel_id: str, payload: ChannelMemberRequest):
+    """Only an existing member can add someone else — prevents a channel
+    from being joined by anyone who merely guesses its id."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    oid, doc = _require_channel(db, channel_id)
+    if payload.added_by not in doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only current channel members can add someone else")
+
+    db["channels"].update_one({"_id": oid}, {"$addToSet": {"members": payload.email}})
+    doc = db["channels"].find_one({"_id": oid})
+    return _channel_to_response(doc)
+
+
+@app.post("/channels/{channel_id}/messages", response_model=MessageResponse)
+@limiter.limit("60/minute")
+async def post_message(request: Request, channel_id: str, payload: MessageCreateRequest):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    oid, doc = _require_channel(db, channel_id)
+    if payload.sender_email not in doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can post messages")
+    if not payload.text.strip() and not payload.attachments:
+        raise HTTPException(status_code=400, detail="Message needs text or an attachment")
+
+    record = {
+        "channel_id": oid,
+        "sender_email": payload.sender_email,
+        "text": payload.text,
+        "attachments": payload.attachments,
+        "created_at": datetime.now(timezone.utc),
+    }
+    result = db["messages"].insert_one(record)
+
+    return MessageResponse(
+        id=str(result.inserted_id),
+        channel_id=channel_id,
+        sender_email=record["sender_email"],
+        text=record["text"],
+        attachments=record["attachments"],
+        created_at=record["created_at"].isoformat(),
+    )
+
+
+@app.get("/channels/{channel_id}/messages", response_model=List[MessageResponse])
+@limiter.limit("120/minute")
+async def list_messages(
+    request: Request,
+    channel_id: str,
+    requester_email: str,
+    since: Optional[str] = None,
+    limit: int = 200,
+):
+    """The polling endpoint the frontend hits every few seconds while a
+    channel is open. Pass `since` (an ISO timestamp, normally the
+    created_at of the last message already rendered) to fetch only what's
+    new since the last poll instead of re-fetching the whole history."""
+    db = get_db()
+    if db is None:
+        return []  # Degrade to an empty channel rather than erroring the whole page
+
+    oid, doc = _require_channel(db, channel_id)
+    if requester_email not in doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can view messages")
+
+    query = {"channel_id": oid}
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            query["created_at"] = {"$gt": since_dt}
+        except ValueError:
+            raise HTTPException(status_code=400, detail="since must be an ISO timestamp")
+
+    docs = db["messages"].find(query).sort("created_at", 1).limit(min(limit, 500))
+    return [
+        MessageResponse(
+            id=str(m["_id"]),
+            channel_id=str(m["channel_id"]),
+            sender_email=m.get("sender_email", ""),
+            text=m.get("text", ""),
+            attachments=m.get("attachments", []),
+            created_at=m["created_at"].isoformat() if m.get("created_at") else "",
+        )
+        for m in docs
+    ]
+
+
+@app.post("/presence/heartbeat")
+@limiter.limit("120/minute")
+async def presence_heartbeat(request: Request, payload: HeartbeatRequest):
+    """Fire-and-forget ping the frontend sends every ~30s while a
+    researcher has the workspace open in an active tab. Deliberately not
+    persisted as history — just the single latest lastSeen per email,
+    upserted in place."""
+    db = get_db()
+    if db is None:
+        # Presence is a nice-to-have, not core data — don't error the tab
+        # over it just because the DB is briefly down.
+        return {"ok": False}
+
+    db["presence"].update_one(
+        {"email": payload.email},
+        {"$set": {"email": payload.email, "last_seen": datetime.now(timezone.utc)}},
+        upsert=True,
+    )
+    return {"ok": True}
+
+
+@app.get("/presence", response_model=List[PresenceEntry])
+@limiter.limit("120/minute")
+async def get_presence(request: Request, emails: str):
+    """emails is a comma-separated list, e.g. from a channel's member
+    list. Anyone whose last heartbeat was within the online window is
+    reported online; anyone with no heartbeat on record at all is reported
+    offline with no last_seen rather than omitted, so the frontend can
+    still render them in the member list."""
+    requested = [e.strip() for e in emails.split(",") if e.strip()]
+    if not requested:
+        return []
+
+    db = get_db()
+    if db is None:
+        return [PresenceEntry(email=e, online=False, last_seen=None) for e in requested]
+
+    docs = {d["email"]: d for d in db["presence"].find({"email": {"$in": requested}})}
+    now = datetime.now(timezone.utc)
+
+    results = []
+    for email in requested:
+        doc = docs.get(email)
+        if doc is None:
+            results.append(PresenceEntry(email=email, online=False, last_seen=None))
+            continue
+        last_seen = doc["last_seen"]
+        online = (now - last_seen).total_seconds() < PRESENCE_ONLINE_WINDOW_SECONDS
+        results.append(PresenceEntry(email=email, online=online, last_seen=last_seen.isoformat()))
+    return results

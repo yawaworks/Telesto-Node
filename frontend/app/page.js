@@ -739,6 +739,12 @@ export default function MissionControl() {
             Actions
           </button>
           <Link
+            href="/workspace"
+            className="border rounded-lg px-2 sm:px-3 py-1.5 text-[10px] sm:text-xs uppercase tracking-widest whitespace-nowrap bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
+          >
+            Workspace
+          </Link>
+          <Link
             href="/profile"
             className="border rounded-lg px-2 sm:px-3 py-1.5 text-[10px] sm:text-xs uppercase tracking-widest whitespace-nowrap bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
           >

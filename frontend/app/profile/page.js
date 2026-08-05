@@ -442,7 +442,15 @@ function ProfileContent() {
         >
           ← Mission control
         </Link>
-        <span className="text-xs uppercase tracking-widest text-[#5a6a72]">Researcher profile</span>
+        <div className="flex items-center gap-4">
+          <Link
+            href="/workspace"
+            className="text-xs uppercase tracking-widest text-[#8fa3ad] hover:text-[#d3dbe0]"
+          >
+            Workspace
+          </Link>
+          <span className="text-xs uppercase tracking-widest text-[#5a6a72]">Researcher profile</span>
+        </div>
       </div>
 
       <div className="max-w-2xl mx-auto px-4 sm:px-6 py-6 sm:py-10">
