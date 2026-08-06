@@ -1,5 +1,12 @@
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
 
+// The last full (unfiltered) GeoJSON loaded by loadSpeciesMarkers, kept
+// so the seasonal-occurrence month filter can slice it client-side
+// without re-fetching from OBIS/iNaturalist every time the slider moves.
+// Module-level by design (same reasoning as popupHandlerAttached below)
+// — there's only ever one bathymetry map instance in this app.
+let lastLoadedGeoJSON = null;
+
 /** Same paint config as the initial layer setup in bathymetry-map.js —
  * duplicated here (not imported) so this file can defensively re-create
  * the source/layer if they're ever missing, without needing a reference
@@ -61,6 +68,7 @@ function ensureRiskLayer(map) {
  */
 export async function loadSpeciesMarkers(map, scientificName) {
   if (!map || !scientificName) return { status: "idle", count: 0 };
+  lastLoadedGeoJSON = null;
 
   try {
     const response = await fetch(
@@ -86,6 +94,7 @@ export async function loadSpeciesMarkers(map, scientificName) {
     ensureRiskLayer(map);
     const source = map.getSource("risk-points");
     source.setData(geojson);
+    lastLoadedGeoJSON = geojson;
     console.debug(
       `[species-markers] "${scientificName}": pushed ${features.length} features into risk-points source`
     );
@@ -94,7 +103,19 @@ export async function loadSpeciesMarkers(map, scientificName) {
 
     if (features.length > 0) {
       fitToFeatures(map, features);
-      return { status: "success", count: features.length, cached: !!geojson.cached };
+      const withMonth = features.filter((f) => f.properties?.eventMonth != null).length;
+      return {
+        status: "success",
+        count: features.length,
+        cached: !!geojson.cached,
+        // Lets the caller decide whether the seasonal-occurrence filter
+        // UI is worth showing at all — many records (especially older
+        // museum/registry data synced through iNaturalist/OBIS) don't
+        // carry a usable date, and a month slider that silently hides
+        // most of the dots would be misleading rather than useful.
+        monthsAvailable: withMonth > 0,
+        withMonthCount: withMonth,
+      };
     }
 
     return { status: "empty", count: 0 };
@@ -109,10 +130,43 @@ export async function loadSpeciesMarkers(map, scientificName) {
  * matches for the current search. */
 export function clearMarkers(map) {
   if (!map) return;
+  lastLoadedGeoJSON = null;
   const source = map.getSource("risk-points");
   if (source) {
     source.setData({ type: "FeatureCollection", features: [] });
   }
+}
+
+/**
+ * Filters the currently-loaded species markers down to a single month
+ * (1-12), or shows all of them again when month is null — client-side,
+ * against the full result set already fetched by loadSpeciesMarkers, no
+ * extra network request per slider move.
+ *
+ * This is NOT tracked animal movement — it's a snapshot of where
+ * OBIS/iNaturalist sightings for this species happened to be recorded
+ * in a given calendar month, pooled across however many years of
+ * records exist. A real migration path would need the same individual
+ * tracked over time (satellite tags, etc.), which this app has no
+ * access to; this is the honest version of "seasonal occurrence
+ * pattern" buildable from citizen-science/research sighting records.
+ */
+export function filterMarkersByMonth(map, month) {
+  if (!map || !lastLoadedGeoJSON) return { count: 0 };
+  const source = map.getSource("risk-points");
+  if (!source) return { count: 0 };
+
+  if (month == null) {
+    source.setData(lastLoadedGeoJSON);
+    return { count: lastLoadedGeoJSON.features?.length || 0 };
+  }
+
+  const filtered = {
+    type: "FeatureCollection",
+    features: (lastLoadedGeoJSON.features || []).filter((f) => f.properties?.eventMonth === month),
+  };
+  source.setData(filtered);
+  return { count: filtered.features.length };
 }
 
 /** Zooms/pans the camera to frame the main cluster of results, with

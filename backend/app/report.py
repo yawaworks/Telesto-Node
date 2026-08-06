@@ -27,7 +27,13 @@ def _mongo_collection():
     return db["detections"] if db is not None else None
 
 
-def log_detections(boxes, coral_bleaching_ratio, owner_email: str | None = None):
+def log_detections(
+    boxes,
+    coral_bleaching_ratio,
+    owner_email: str | None = None,
+    latitude: float | None = None,
+    longitude: float | None = None,
+):
     """Called from /analyze-frame after each successful inference so the
     export report can summarize the whole session. Writes to MongoDB when
     available; falls back to an in-memory list otherwise.
@@ -39,6 +45,13 @@ def log_detections(boxes, coral_bleaching_ratio, owner_email: str | None = None)
     and snapshots. It's optional — entries logged without it (older data,
     or no session) are only visible under "team" scope, never "mine",
     so they can't silently get attributed to whoever asks first.
+
+    latitude/longitude are the same telemetry-derived coordinates already
+    threaded through analyze-frame for other purposes — stored here too
+    so habitat-trend tracking (app/habitat.py) can group readings by
+    location, not just by time. Entries logged before this existed, or
+    without live telemetry, have no coordinates and are simply excluded
+    from location-based habitat queries rather than guessed at.
     """
     timestamp = datetime.now(timezone.utc)
     entries = []
@@ -50,6 +63,8 @@ def log_detections(boxes, coral_bleaching_ratio, owner_email: str | None = None)
                 "confidence": box["confidence"],
                 "source": box.get("source"),
                 "owner_email": owner_email,
+                "latitude": latitude,
+                "longitude": longitude,
             }
         )
     if coral_bleaching_ratio is not None:
@@ -60,6 +75,8 @@ def log_detections(boxes, coral_bleaching_ratio, owner_email: str | None = None)
                 "confidence": coral_bleaching_ratio,
                 "source": "coral_bleach",
                 "owner_email": owner_email,
+                "latitude": latitude,
+                "longitude": longitude,
             }
         )
 

@@ -58,6 +58,8 @@ from app.bioacoustics import (
     load_waveform,
 )
 from app.translate import COMMON_LANGUAGES, translate_text
+from app.habitat import bounding_box, compute_habitat_trend
+from app.vessel_tracking import fetch_vessel_activity, GFW_API_KEY
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -123,6 +125,11 @@ class SpeciesSyncRecord(BaseModel):
     depth_meters: Optional[float] = None
     country: Optional[str] = None
     source: str  # "obis" or "inaturalist"
+    # ISO date string from the source record (OBIS eventDate, iNaturalist
+    # observed_on) — used to derive event_month for the map's seasonal
+    # occurrence filter. Optional because not every record has one; those
+    # entries just never match a month filter, they aren't dropped.
+    event_date: Optional[str] = None
 
 
 class SpeciesSyncPayload(BaseModel):
@@ -145,6 +152,30 @@ def _clean(value):
         if isinstance(value, float) and math.isnan(value):
             return None
     return value
+
+
+def _extract_event_month(date_str) -> int | None:
+    """Pulls a 1-12 month out of an OBIS eventDate or iNaturalist
+    observed_on string for the map's seasonal-occurrence filter. Both
+    sources are inconsistent about exact format (OBIS eventDate can be a
+    single date, a date range like "2019-03-01/2019-03-15", or just a
+    year) — this only needs the month, so it grabs the first YYYY-MM-DD-
+    shaped prefix it finds rather than fully parsing every variant.
+    Returns None (not a guess) for anything it can't confidently read,
+    same as this app's other "don't fabricate data" spots."""
+    if not date_str or not isinstance(date_str, str):
+        return None
+    # Take the first date if it's a range ("start/end").
+    first = date_str.split("/")[0].strip()
+    parts = first.split("-")
+    if len(parts) >= 2:
+        try:
+            month = int(parts[1])
+            if 1 <= month <= 12:
+                return month
+        except ValueError:
+            return None
+    return None
 
 
 @app.on_event("startup")
@@ -234,7 +265,23 @@ async def analyze_frame(
         else:
             frame_ratio = None
 
-    log_detections(result["boxes"], frame_ratio, owner_email=owner_email)
+    log_detections(
+        result["boxes"],
+        frame_ratio,
+        owner_email=owner_email,
+        # Same latitude/longitude already used for alerts above — see
+        # this route's docstring. Worth knowing: these fall back to the
+        # mission's fixed home coordinates when the frontend hasn't sent
+        # live telemetry yet, so early-session entries (or any session
+        # where telemetry silently isn't wired up) can end up logged at
+        # that fallback point rather than a real position. Habitat-trend
+        # queries (app/habitat.py) group by location, so a batch of
+        # readings that are all suspiciously exactly at the mission's
+        # home coordinates is a sign telemetry wasn't actually live for
+        # that stretch, not a real finding about that spot.
+        latitude=latitude,
+        longitude=longitude,
+    )
 
     # Fire detection alerts directly via Resend (no n8n in the path)
     # without blocking the response the frontend is waiting on.
@@ -700,6 +747,7 @@ async def species_data(request: Request, scientific_name: str, max_records: int 
                         "depth_meters": _clean(doc.get("depth_meters")),
                         "country": doc.get("country"),
                         "source": doc.get("source"),
+                        "eventMonth": _clean(doc.get("event_month")),
                     },
                 }
             )
@@ -731,6 +779,7 @@ async def species_data(request: Request, scientific_name: str, max_records: int 
                     "scientificName": _clean(row.get("scientificName")),
                     "depth_meters": _clean(row.get("depth_meters")),
                     "country": _clean(row.get("country")),
+                    "eventMonth": _extract_event_month(row.get("event_date")),
                 },
             }
         )
@@ -797,6 +846,7 @@ async def species_sync(request: Request, payload: SpeciesSyncPayload):
                 "$set": {
                     "depth_meters": record.depth_meters,
                     "country": record.country,
+                    "event_month": _extract_event_month(record.event_date),
                     "synced_at": now,
                 }
             },
@@ -2506,3 +2556,148 @@ def translate_languages(request: Request):
     validation allowlist. /translate accepts any ISO 639-1 code whether
     or not it's in this list."""
     return [LanguageOption(**lang) for lang in COMMON_LANGUAGES]
+
+
+# ---------------------------------------------------------------------------
+# Habitat change tracking — see app/habitat.py for the honest limitations
+# (bounding-box location grouping, not a real geospatial query; trend
+# quality bounded by whether live telemetry was actually on when each
+# reading was logged; "species count" means detected labels, not
+# confirmed identifications).
+# ---------------------------------------------------------------------------
+
+
+class HabitatTrendPeriod(BaseModel):
+    period: str
+    species_count: int
+    detection_count: int
+    bleaching_reading_count: int
+    mean_bleaching_ratio: float | None
+
+
+class HabitatTrendResponse(BaseModel):
+    latitude: float
+    longitude: float
+    radius_km: float
+    scope: str
+    trend: List[HabitatTrendPeriod]
+    warning: str
+
+
+@app.get("/habitat-trend", response_model=HabitatTrendResponse)
+@limiter.limit("20/minute")
+async def habitat_trend(
+    request: Request,
+    latitude: float,
+    longitude: float,
+    radius_km: float = 5.0,
+    months_back: int = 24,
+    scope: str = "team",
+    owner_email: str | None = None,
+):
+    """Species-count and coral-bleaching trend over time for a location,
+    built from the same detection log mission reports use (app/report.py)
+    — now that entries carry coordinates. scope="mine" needs owner_email
+    and only includes that researcher's own logged detections; "team"
+    (default) pools everyone's, same convention as mission reports."""
+    if scope == "mine" and not owner_email:
+        raise HTTPException(status_code=400, detail="owner_email is required for scope=mine")
+    if radius_km <= 0 or radius_km > 500:
+        raise HTTPException(status_code=400, detail="radius_km must be between 0 and 500")
+
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Habitat trend data is unavailable right now")
+
+    box = bounding_box(latitude, longitude, radius_km)
+    since = datetime.now(timezone.utc) - timedelta(days=months_back * 31)
+
+    query = {
+        "timestamp": {"$gte": since},
+        "latitude": {"$gte": box["min_lat"], "$lte": box["max_lat"]},
+        "longitude": {"$gte": box["min_lng"], "$lte": box["max_lng"]},
+    }
+    if scope == "mine":
+        query["owner_email"] = owner_email
+
+    try:
+        entries = list(db["detections"].find(query))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Habitat trend query failed: {exc}")
+
+    trend = compute_habitat_trend(entries)
+
+    return HabitatTrendResponse(
+        latitude=latitude,
+        longitude=longitude,
+        radius_km=radius_km,
+        scope=scope,
+        trend=[HabitatTrendPeriod(**t) for t in trend],
+        warning=(
+            "Built from logged detections at this location — trend quality depends on how "
+            "much mission time was actually logged here, and on live telemetry (vs. fallback "
+            "coordinates) being on during those sessions. Species counts are detected labels, "
+            "not confirmed identifications."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Vessel movement tracking (Global Fishing Watch) — see app/vessel_tracking.py
+# for the full honesty flag. This integration could not be tested against
+# GFW's live API from this environment; treat the first real deployed
+# request as the actual verification step, not this code review.
+# ---------------------------------------------------------------------------
+
+
+class VesselActivityCell(BaseModel):
+    latitude: float
+    longitude: float
+    hours: float | None
+
+
+class VesselActivityResponse(BaseModel):
+    cells: List[VesselActivityCell]
+    warning: str
+
+
+@app.get("/vessel-activity", response_model=VesselActivityResponse)
+@limiter.limit("15/minute")
+async def vessel_activity(
+    request: Request,
+    min_lat: float,
+    min_lng: float,
+    max_lat: float,
+    max_lng: float,
+    start_date: str,
+    end_date: str,
+):
+    """Apparent fishing effort within a bounding box and date range, from
+    Global Fishing Watch. Returns a clean 503 (not a crash) when
+    GFW_API_KEY isn't set — same optional-key degradation pattern as
+    BHL/IUCN elsewhere in this app. Unlike those, the actual data-fetch
+    path here is UNVERIFIED against GFW's live API — see
+    app/vessel_tracking.py's module docstring before trusting results."""
+    if not GFW_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="Vessel tracking isn't configured — set GFW_API_KEY on the backend (requires "
+            "applying for API access at globalfishingwatch.org/our-apis)",
+        )
+    if max_lat <= min_lat or max_lng <= min_lng:
+        raise HTTPException(status_code=400, detail="max_lat/max_lng must be greater than min_lat/min_lng")
+
+    try:
+        cells = await fetch_vessel_activity(min_lat, min_lng, max_lat, max_lng, start_date, end_date)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    return VesselActivityResponse(
+        cells=[VesselActivityCell(**c) for c in cells],
+        warning=(
+            "Apparent fishing effort derived from AIS vessel tracking data — doesn't capture "
+            "vessels with AIS off/spoofed, non-fishing vessel traffic, or small/artisanal craft "
+            "without AIS. This integration is unverified against GFW's live API; treat unexpected "
+            "results (especially an empty response where activity is expected) with suspicion."
+        ),
+    )

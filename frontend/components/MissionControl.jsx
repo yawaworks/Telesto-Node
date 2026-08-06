@@ -6,17 +6,24 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { initGamepadNavigation } from "../lib/gamepad-controller";
 import { initBathymetryMap } from "../lib/bathymetry-map";
-import { loadSpeciesMarkers } from "../lib/species-markers";
+import { loadSpeciesMarkers, filterMarkersByMonth } from "../lib/species-markers";
+import HabitatTrendPanel from "./HabitatTrendPanel";
+import { loadVesselActivity, clearVesselActivity } from "../lib/vessel-layer";
 import { useFrameDetection, DEFAULT_CONF_THRESHOLD } from "../lib/useFrameDetection";
 import { useTelemetry } from "../lib/useTelemetry";
 import DetectionOverlay from "./DetectionOverlay";
 import BioacousticsPanel from "./BioacousticsPanel";
+import FieldTranslator from "./FieldTranslator";
 import SnapshotAnnotator from "./SnapshotAnnotator";
 import OfflineStatusBadge from "./OfflineStatusBadge";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
 const BLEACHING_ALERT_THRESHOLD = 0.4;
 const DEFAULT_SPECIES = "Acropora cervicornis";
+const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
 const DEFAULT_VIDEO_SRC =
   process.env.NEXT_PUBLIC_DEFAULT_VIDEO_URL ||
   "https://res.cloudinary.com/YOUR_CLOUD_NAME/video/upload/rov-feed.mp4";
@@ -75,6 +82,18 @@ export default function MissionControl({ embedded = false, channelId = null } = 
   // it could succeed, fail, or find nothing, and the map would just sit
   // there unchanged either way.
   const [speciesSearchStatus, setSpeciesSearchStatus] = useState("idle");
+  // Seasonal-occurrence month filter for the currently plotted species —
+  // null means "show all months". Only surfaced in the UI when the
+  // current result set actually has dated records to filter (see
+  // monthsAvailable from loadSpeciesMarkers's return value).
+  const [monthsAvailable, setMonthsAvailable] = useState(false);
+  const [selectedMonth, setSelectedMonth] = useState(null);
+  // { latitude, longitude } | null — centered on the map's current view
+  // at the moment the button is pressed, not live-updated as the map pans.
+  const [habitatTrendCenter, setHabitatTrendCenter] = useState(null);
+  const [vesselLayerOn, setVesselLayerOn] = useState(false);
+  const [vesselStatus, setVesselStatus] = useState("idle");
+  const [fieldTranslatorOpen, setFieldTranslatorOpen] = useState(false);
   const [speciesResultCount, setSpeciesResultCount] = useState(0);
   const speciesSearchDebounceRef = useRef(null);
   // Guards against an older, slower request's response landing AFTER a
@@ -517,6 +536,8 @@ export default function MissionControl({ embedded = false, channelId = null } = 
 
     const seq = ++speciesSearchSeqRef.current;
     setSpeciesSearchStatus("loading");
+    setSelectedMonth(null); // new search — drop any month filter from the previous species
+    setMonthsAvailable(false);
 
     const result = await loadSpeciesMarkers(mapRef.current, query.trim());
 
@@ -524,6 +545,50 @@ export default function MissionControl({ embedded = false, channelId = null } = 
 
     setSpeciesSearchStatus(result.status);
     setSpeciesResultCount(result.count || 0);
+    setMonthsAvailable(!!result.monthsAvailable);
+  }
+
+  function handleMonthFilterChange(month) {
+    setSelectedMonth(month);
+    if (!mapRef.current) return;
+    const result = filterMarkersByMonth(mapRef.current, month);
+    setSpeciesResultCount(result.count);
+  }
+
+  function handleOpenHabitatTrend() {
+    if (!mapRef.current) return;
+    const center = mapRef.current.getCenter();
+    setHabitatTrendCenter({ latitude: center.lat, longitude: center.lng });
+  }
+
+  async function handleToggleVesselLayer() {
+    if (!mapRef.current) return;
+
+    if (vesselLayerOn) {
+      clearVesselActivity(mapRef.current);
+      setVesselLayerOn(false);
+      setVesselStatus("idle");
+      return;
+    }
+
+    setVesselStatus("loading");
+    const bounds = mapRef.current.getBounds();
+    // Last 90 days by default — recent-enough activity to be relevant to
+    // a live mission without pulling a huge date range on first load.
+    const end = new Date();
+    const start = new Date(end.getTime() - 90 * 24 * 60 * 60 * 1000);
+    const result = await loadVesselActivity(
+      mapRef.current,
+      {
+        minLat: bounds.getSouth(),
+        minLng: bounds.getWest(),
+        maxLat: bounds.getNorth(),
+        maxLng: bounds.getEast(),
+      },
+      { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) }
+    );
+    setVesselStatus(result.status);
+    setVesselLayerOn(result.status === "success" || result.status === "empty");
   }
 
   function handleSpeciesQueryChange(value) {
@@ -855,6 +920,67 @@ export default function MissionControl({ embedded = false, channelId = null } = 
               )}
             </div>
           )}
+
+          {monthsAvailable && (
+            <div className="pointer-events-auto bg-[#1c2226]/90 border border-[#3a444a] rounded-lg px-3 py-1.5 w-full sm:w-64">
+              <div className="flex items-center justify-between text-[9px] uppercase tracking-widest text-[#5a6a72] mb-1">
+                <span>Seasonal occurrence</span>
+                <span className="text-[#8fa3ad]">
+                  {selectedMonth ? MONTH_NAMES[selectedMonth - 1] : "All months"}
+                </span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="12"
+                step="1"
+                value={selectedMonth ?? 0}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value, 10);
+                  handleMonthFilterChange(v === 0 ? null : v);
+                }}
+                className="w-full h-1 accent-[#8fa3ad] cursor-pointer"
+                aria-label="Filter sightings by month"
+              />
+              <p className="text-[8px] text-[#5a6a72] mt-1 leading-tight">
+                Sighting records by month, pooled across years — not a tracked migration path.
+              </p>
+            </div>
+          )}
+
+          <button
+            onClick={handleOpenHabitatTrend}
+            className="pointer-events-auto bg-[#1c2226]/90 border border-[#3a444a] rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest text-[#b7c4cc] hover:bg-[#2a333a] hover:border-[#8fa3ad]/60"
+          >
+            Habitat trend for this area
+          </button>
+
+          <button
+            onClick={handleToggleVesselLayer}
+            disabled={vesselStatus === "loading"}
+            className={`pointer-events-auto border rounded-lg px-3 py-1 text-[10px] uppercase tracking-widest disabled:opacity-50 ${
+              vesselLayerOn
+                ? "bg-[#d8a877]/15 border-[#d8a877]/50 text-[#d8a877]"
+                : "bg-[#1c2226]/90 border-[#3a444a] text-[#b7c4cc] hover:bg-[#2a333a] hover:border-[#8fa3ad]/60"
+            }`}
+          >
+            {vesselStatus === "loading"
+              ? "Loading vessel activity…"
+              : vesselLayerOn
+              ? "Hide vessel activity"
+              : "Show vessel activity (90d)"}
+          </button>
+          {vesselStatus === "not_configured" && (
+            <p className="pointer-events-none text-[9px] text-[#a48a55] text-center max-w-xs">
+              Vessel tracking isn't configured — needs a Global Fishing Watch API key on the backend.
+            </p>
+          )}
+          {vesselStatus === "error" && (
+            <p className="pointer-events-none text-[9px] text-[#c47a6e] text-center max-w-xs">
+              Vessel activity request failed — this integration is unverified against GFW's live
+              API and may need adjustment.
+            </p>
+          )}
         </div>
       )}
 
@@ -1022,6 +1148,12 @@ export default function MissionControl({ embedded = false, channelId = null } = 
         >
           {emailingReport && <span className="w-1.5 h-1.5 rounded-full bg-[#8fa3ad] animate-pulse" />}
           {emailingReport ? "Sending…" : "Email report"}
+        </button>
+        <button
+          onClick={() => setFieldTranslatorOpen(true)}
+          className="pointer-events-auto bg-[#1c2226]/90 border border-[#3a444a] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left text-[#b7c4cc] hover:bg-[#2a333a] hover:border-[#8fa3ad]/60"
+        >
+          Field translator
         </button>
         {isVideoMode && (
           <button
@@ -1276,6 +1408,23 @@ export default function MissionControl({ embedded = false, channelId = null } = 
               ))}
             </div>
           </div>
+        </div>
+      )}
+
+      {fieldTranslatorOpen && (
+        <div className="absolute inset-0 bg-black/70 pointer-events-auto flex items-center justify-center p-3 sm:p-0">
+          <FieldTranslator onClose={() => setFieldTranslatorOpen(false)} />
+        </div>
+      )}
+
+      {habitatTrendCenter && (
+        <div className="absolute inset-0 bg-black/70 pointer-events-auto flex items-center justify-center p-3 sm:p-0">
+          <HabitatTrendPanel
+            latitude={habitatTrendCenter.latitude}
+            longitude={habitatTrendCenter.longitude}
+            currentEmail={session?.user?.email}
+            onClose={() => setHabitatTrendCenter(null)}
+          />
         </div>
       )}
 

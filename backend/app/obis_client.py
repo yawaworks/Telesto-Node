@@ -21,6 +21,7 @@ def fetch_obis_species_data(scientific_name: str, max_records: int = 100):
             "longitude": item.get("decimalLongitude"),
             "depth_meters": item.get("depth"),
             "country": item.get("country", "International Waters"),
+            "event_date": item.get("eventDate"),
         }
         for item in results
     ]

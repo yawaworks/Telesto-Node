@@ -40,6 +40,7 @@ def fetch_obis(species: str) -> list[dict]:
             "depth_meters": r.get("depth"),
             "country": r.get("country"),
             "source": "obis",
+            "event_date": r.get("eventDate"),
         })
     return records
 
@@ -69,6 +70,7 @@ def fetch_inaturalist(species: str) -> list[dict]:
             "depth_meters": None,
             "country": (r.get("place_guess") or "").split(",")[-1].strip() or None,
             "source": "inaturalist",
+            "event_date": r.get("observed_on"),
         })
     return records
 
