@@ -2,10 +2,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useChannelMessages } from "../lib/useChannelMessages";
+import { listTranslationLanguages } from "../lib/workspaceApi";
 import MessageRow from "./MessageRow";
 import MessageComposer from "./MessageComposer";
 import ForwardMessageModal from "./ForwardMessageModal";
 import ReportMessageModal from "./ReportMessageModal";
+import { TranslateIcon } from "./icons";
 
 const GROUP_WINDOW_MS = 5 * 60 * 1000; // messages within 5 minutes of the same sender collapse into one group
 
@@ -26,6 +28,26 @@ export default function ChatPanel({ channelId, currentEmail, channels, isAdmin }
   const [reportTarget, setReportTarget] = useState(null); // message being reported
   const bottomRef = useRef(null);
 
+  // Per-channel "translate to" language — set once, applies to every
+  // message's translate button in this channel. Defaults to the
+  // browser's own language if it's a real ISO 639-1 code, else "en".
+  // Session-only, same as Mission Control's other lightweight
+  // preferences — not persisted server-side.
+  const [languages, setLanguages] = useState([{ code: "en", name: "English" }]);
+  const [targetLang, setTargetLang] = useState(() => {
+    if (typeof navigator !== "undefined" && navigator.language) {
+      const short = navigator.language.split("-")[0];
+      if (short && short.length === 2) return short;
+    }
+    return "en";
+  });
+
+  useEffect(() => {
+    listTranslationLanguages()
+      .then(setLanguages)
+      .catch((err) => console.error("Failed to load translation languages:", err));
+  }, []);
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
@@ -43,6 +65,25 @@ export default function ChatPanel({ channelId, currentEmail, channels, isAdmin }
 
   return (
     <div className="flex flex-col h-full">
+      <div className="flex items-center justify-end gap-1.5 px-4 sm:px-6 pt-2 shrink-0">
+        <TranslateIcon className="w-3 h-3 text-[#5a6a72]" />
+        <label htmlFor="chat-translate-lang" className="sr-only">
+          Translate messages to
+        </label>
+        <select
+          id="chat-translate-lang"
+          value={targetLang}
+          onChange={(e) => setTargetLang(e.target.value)}
+          className="bg-transparent border border-[#3a444a] rounded px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[#8fa3ad] outline-none focus:border-[#8fa3ad] cursor-pointer"
+        >
+          {languages.map((lang) => (
+            <option key={lang.code} value={lang.code} className="bg-[#1c2226] text-[#d3dbe0]">
+              {lang.name}
+            </option>
+          ))}
+        </select>
+      </div>
+
       <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 flex flex-col">
         {loading && <p className="text-xs text-[#5a6a72]">Loading messages…</p>}
         {!loading && messages.length === 0 && (
@@ -55,6 +96,7 @@ export default function ChatPanel({ channelId, currentEmail, channels, isAdmin }
             grouped={isSameGroup(messages[i - 1], m)}
             currentEmail={currentEmail}
             isAdmin={isAdmin}
+            targetLang={targetLang}
             onReply={setReplyingTo}
             onForward={setForwardTarget}
             onTogglePin={togglePin}

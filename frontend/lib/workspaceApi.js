@@ -220,3 +220,54 @@ export async function analyzeAcousticClip(channelId, { file, referenceId, reques
   });
   return handle(res);
 }
+
+// --- Translation (human-language — see backend/app/translate.py) ---------
+// Shared by every translation touchpoint in the app: chat messages here,
+// plus Species Inspector literature and the fieldwork/interview
+// translator both call the same /translate route.
+
+export async function translateText({ text, targetLang, sourceLang = "auto" }) {
+  return jsonPost("/translate", { text, target_lang: targetLang, source_lang: sourceLang });
+}
+
+export async function listTranslationLanguages() {
+  return fetch(`${API_BASE_URL}/translate/languages`).then(handle);
+}
+
+// --- Acoustic-context tooling (behavior tagging + rhythm comparison —
+// see backend/app/bioacoustics.py's rhythm-comparison section) ------------
+// Persisted, channel-scoped. Deliberately not a translator — see the
+// backend docstring for the full rationale.
+
+export async function createAcousticEvent(channelId, { label = "", createdBy, context, iciMs, durationSeconds }) {
+  return jsonPost(`/channels/${channelId}/acoustic-events`, {
+    label,
+    created_by: createdBy,
+    context,
+    ici_ms: iciMs,
+    duration_seconds: durationSeconds,
+  });
+}
+
+export async function listAcousticEvents(channelId, requesterEmail) {
+  const params = new URLSearchParams({ requester_email: requesterEmail });
+  return fetch(`${API_BASE_URL}/channels/${channelId}/acoustic-events?${params}`).then(handle);
+}
+
+export async function deleteAcousticEvent(eventId, requestedBy) {
+  const params = new URLSearchParams({ requested_by: requestedBy });
+  return fetch(`${API_BASE_URL}/acoustic-events/${eventId}?${params}`, { method: "DELETE" }).then(handle);
+}
+
+export async function compareAcousticEvents(channelId, { requesterEmail, eventIdA, eventIdB }) {
+  const params = new URLSearchParams({
+    requester_email: requesterEmail,
+    event_id_a: eventIdA,
+    event_id_b: eventIdB,
+  });
+  return fetch(`${API_BASE_URL}/channels/${channelId}/acoustic-events/compare?${params}`).then(handle);
+}
+
+export async function compareRhythmStandalone({ iciAMs, iciBMs }) {
+  return jsonPost("/acoustic-rhythm-compare", { ici_a_ms: iciAMs, ici_b_ms: iciBMs });
+}

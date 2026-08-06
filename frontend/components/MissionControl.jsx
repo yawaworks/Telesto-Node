@@ -10,6 +10,7 @@ import { loadSpeciesMarkers } from "../lib/species-markers";
 import { useFrameDetection, DEFAULT_CONF_THRESHOLD } from "../lib/useFrameDetection";
 import { useTelemetry } from "../lib/useTelemetry";
 import DetectionOverlay from "./DetectionOverlay";
+import BioacousticsPanel from "./BioacousticsPanel";
 import SnapshotAnnotator from "./SnapshotAnnotator";
 import OfflineStatusBadge from "./OfflineStatusBadge";
 
@@ -20,7 +21,7 @@ const DEFAULT_VIDEO_SRC =
   process.env.NEXT_PUBLIC_DEFAULT_VIDEO_URL ||
   "https://res.cloudinary.com/YOUR_CLOUD_NAME/video/upload/rov-feed.mp4";
 
-export default function MissionControl({ embedded = false } = {}) {
+export default function MissionControl({ embedded = false, channelId = null } = {}) {
   const { data: session, status: sessionStatus } = useSession();
   const router = useRouter();
 
@@ -625,6 +626,8 @@ export default function MissionControl({ embedded = false } = {}) {
   }
 
   const isMapMode = viewMode === "map";
+  const isAcousticsMode = viewMode === "acoustics";
+  const isVideoMode = viewMode === "video";
 
   const activeToast = emailReportMessage || snapshotMessage;
 
@@ -668,7 +671,7 @@ export default function MissionControl({ embedded = false } = {}) {
           }
         }}
         onLoadedData={() => setVideoLoadError(false)}
-        style={{ opacity: isMapMode ? 0 : 1 }}
+        style={{ opacity: isVideoMode ? 1 : 0 }}
       />
 
       <input
@@ -681,8 +684,8 @@ export default function MissionControl({ embedded = false } = {}) {
 
       <DetectionOverlay
         videoRef={videoRef}
-        boxes={isMapMode ? [] : boxes}
-        ghostBoxes={isMapMode ? [] : ghostBoxes}
+        boxes={isVideoMode ? boxes : []}
+        ghostBoxes={isVideoMode ? ghostBoxes : []}
         onViewDistribution={handleViewDistribution}
       />
 
@@ -695,12 +698,18 @@ export default function MissionControl({ embedded = false } = {}) {
         }}
       />
 
+      {isAcousticsMode && (
+        <div className="absolute inset-0 w-full h-full bg-[#12171a] pt-14 pointer-events-auto">
+          <BioacousticsPanel channelId={channelId} currentEmail={session?.user?.email} />
+        </div>
+      )}
+
       <div className="absolute top-0 left-0 right-0 h-14 flex items-center justify-between gap-1 px-2 sm:px-4 bg-[#1c2226]/90 border-b border-[#3a444a] pointer-events-auto overflow-x-auto">
         <div className="flex gap-1 sm:gap-2 shrink-0">
           <button
             onClick={() => setViewMode("video")}
             className={`border rounded-lg px-2 sm:px-3 py-1.5 text-[10px] sm:text-xs uppercase tracking-widest whitespace-nowrap ${
-              !isMapMode
+              isVideoMode
                 ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
                 : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
             }`}
@@ -719,10 +728,21 @@ export default function MissionControl({ embedded = false } = {}) {
             <span className="sm:hidden">Map</span>
             <span className="hidden sm:inline">Bathymetry map</span>
           </button>
+          <button
+            onClick={() => setViewMode("acoustics")}
+            className={`border rounded-lg px-2 sm:px-3 py-1.5 text-[10px] sm:text-xs uppercase tracking-widest whitespace-nowrap ${
+              isAcousticsMode
+                ? "bg-[#8fa3ad]/20 border-[#8fa3ad]/60 text-[#d3dbe0]"
+                : "bg-white/[0.04] border-[#3a444a] text-[#b7c4cc] hover:bg-white/[0.08]"
+            }`}
+          >
+            <span className="sm:hidden">Audio</span>
+            <span className="hidden sm:inline">Bioacoustics</span>
+          </button>
         </div>
 
         <div className="hidden sm:flex items-center gap-2 shrink-0">
-          {!isMapMode ? (
+          {isVideoMode && (
             <>
               <span
                 className={`w-2 h-2 rounded-full ${
@@ -745,8 +765,12 @@ export default function MissionControl({ embedded = false } = {}) {
                   : "Connecting…"}
               </span>
             </>
-          ) : (
-            <span className="text-xs uppercase tracking-widest text-[#5a6a72]">Map mode</span>
+          )}
+          {isMapMode && <span className="text-xs uppercase tracking-widest text-[#5a6a72]">Map mode</span>}
+          {isAcousticsMode && (
+            <span className="text-xs uppercase tracking-widest text-[#5a6a72]">
+              Bioacoustics{channelId ? " · shared library" : " · solo session"}
+            </span>
           )}
         </div>
 
@@ -886,7 +910,7 @@ export default function MissionControl({ embedded = false } = {}) {
               : telemetry.heading}
           </p>
         </div>
-        {!isMapMode && opticalFlow && opticalFlow.magnitude >= 0.05 && (
+        {isVideoMode && opticalFlow && opticalFlow.magnitude >= 0.05 && (
           <div className="px-3 sm:px-4 py-2 sm:py-2.5">
             <p className="text-[10px] uppercase tracking-widest text-[#7de88f]">
               Motion · derived from feed
@@ -896,7 +920,7 @@ export default function MissionControl({ embedded = false } = {}) {
             </p>
           </div>
         )}
-        {!isMapMode && coralBleachingRatio !== null && (
+        {isVideoMode && coralBleachingRatio !== null && (
           <div className="px-3 sm:px-4 py-2 sm:py-2.5">
             <p className="text-[10px] uppercase tracking-widest text-[#d8b877]">Coral · unvalidated model</p>
             <p className={`text-sm ${alert ? "text-[#d8b877]" : ""}`}>
@@ -999,7 +1023,7 @@ export default function MissionControl({ embedded = false } = {}) {
           {emailingReport && <span className="w-1.5 h-1.5 rounded-full bg-[#8fa3ad] animate-pulse" />}
           {emailingReport ? "Sending…" : "Email report"}
         </button>
-        {!isMapMode && (
+        {isVideoMode && (
           <button
             onClick={handleOpenLibrary}
             className="pointer-events-auto bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left text-[#b7c4cc] hover:bg-white/[0.08]"
@@ -1007,7 +1031,7 @@ export default function MissionControl({ embedded = false } = {}) {
             Clip library
           </button>
         )}
-        {!isMapMode && (
+        {isVideoMode && (
           <button
             onClick={handleOpenSnapshotLibrary}
             className="pointer-events-auto bg-white/[0.04] border border-[#3a444a] rounded-lg px-3 py-2 text-xs uppercase tracking-widest text-left text-[#b7c4cc] hover:bg-white/[0.08]"
@@ -1047,17 +1071,17 @@ export default function MissionControl({ embedded = false } = {}) {
         </div>
       )}
 
-      {!isMapMode && alert && (
+      {isVideoMode && alert && (
         <div className="absolute bottom-28 sm:bottom-20 left-2 right-2 sm:left-auto sm:right-4 text-center sm:text-left bg-[#a48a55]/10 border border-[#b38d47] text-[#d8b877] rounded-xl px-3 sm:px-4 py-2 text-[11px] sm:text-xs">
           Possible bleaching — unverified
         </div>
       )}
 
-      {!isMapMode && (
+      {isVideoMode && (
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-10 h-10 sm:w-16 sm:h-16 border border-[#8fa3ad]/60 rounded-full animate-pulse pointer-events-none" />
       )}
 
-      {!isMapMode && (
+      {isVideoMode && (
         <div className="absolute bottom-0 left-0 right-0 bg-[#1c2226]/90 border-t border-[#3a444a] px-2 sm:px-4 py-2 sm:py-3 pointer-events-auto max-h-[45vh] sm:max-h-none overflow-y-auto">
           <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
             <button

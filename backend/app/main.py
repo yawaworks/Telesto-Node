@@ -48,12 +48,16 @@ from app.weight_estimate import estimate_weight_grams, fishbase_search_url
 from app.bioacoustics import (
     SAMPLE_RATE,
     WINDOW_SECONDS,
+    analyze_soundscape,
+    compare_rhythm,
+    compute_rhythm_signature,
     embed_windows,
     embedding_from_list,
     embedding_to_list,
     find_similar_windows,
     load_waveform,
 )
+from app.translate import COMMON_LANGUAGES, translate_text
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -1948,6 +1952,23 @@ class AcousticAnalysisResponse(BaseModel):
     matches: List[AcousticMatch]
     windows_analyzed: int
     warning: str
+    # Soundscape/signal metrics computed directly from the uploaded
+    # clip's audio (see app/bioacoustics.py's analyze_soundscape) —
+    # independent of the similarity search above and carries its own,
+    # different confidence level: these are measured, not model output.
+    metrics: dict
+
+
+class AcousticMetricsResponse(BaseModel):
+    """Standalone soundscape/signal-metrics response — no reference clip
+    or channel required. This is the solo Mission Control path: a
+    researcher can drop in one recording and get NDSI/ACI/ADI/AEI, level
+    metrics, and pulse-based signal metrics without needing a Team
+    Workspace channel or a saved reference sound library."""
+
+    duration_seconds: float
+    metrics: dict
+    warning: str
 
 
 @app.post("/channels/{channel_id}/acoustic-references", response_model=AcousticReferenceResponse)
@@ -2106,10 +2127,382 @@ async def analyze_acoustic_clip(
 
     windows_analyzed = max(1, int(np.ceil(len(waveform) / (SAMPLE_RATE * WINDOW_SECONDS))))
 
+    try:
+        soundscape_metrics = analyze_soundscape(waveform, SAMPLE_RATE)
+    except Exception as exc:
+        # Metrics are a plain-DSP add-on to the similarity search above —
+        # don't fail the whole request (which the researcher is actively
+        # waiting on) just because one of the newer metric functions hit
+        # an edge case on this clip. Similarity search still returns.
+        print(f"[bioacoustics] soundscape metrics failed, omitting: {exc}")
+        soundscape_metrics = {}
+
     return AcousticAnalysisResponse(
         reference_label=ref_doc.get("label", ""),
         threshold=threshold,
         matches=[AcousticMatch(**m) for m in matches],
         windows_analyzed=windows_analyzed,
         warning="Similarity search only, not a calibrated species classifier — verify matches by ear before citing them.",
+        metrics=soundscape_metrics,
     )
+
+
+@app.post("/acoustic-metrics", response_model=AcousticMetricsResponse)
+@limiter.limit("10/minute")
+async def acoustic_metrics(
+    request: Request,
+    file: UploadFile = File(...),
+    calibration_offset_db: float | None = Form(None),
+):
+    """Standalone soundscape + signal metrics for one uploaded clip — no
+    channel, no reference sound, no Team Workspace membership required.
+    This is the solo Mission Control path (see app/bioacoustics.py's
+    analyze_soundscape): a researcher working alone can still get
+    NDSI/ACI/ADI/AEI, level metrics, and pulse-based signal metrics.
+
+    calibration_offset_db is optional — only pass it if you actually
+    know your hydrophone's calibration offset. Without it, level metrics
+    are relative (dBFS), not true SPL re 1 uPa; see analyze_soundscape's
+    module-level docstring for why that distinction matters."""
+    raw_bytes = await file.read()
+    if len(raw_bytes) > MAX_ACOUSTIC_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Clip is too large for live analysis — keep it under 20MB")
+
+    try:
+        waveform = load_waveform(raw_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    duration_seconds = len(waveform) / SAMPLE_RATE
+    if duration_seconds > MAX_ACOUSTIC_AUDIO_SECONDS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Clips over {MAX_ACOUSTIC_AUDIO_SECONDS}s aren't analyzed live on the free tier — trim it first",
+        )
+
+    try:
+        metrics = analyze_soundscape(waveform, SAMPLE_RATE, calibration_offset_db=calibration_offset_db)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Metrics computation failed: {exc}")
+
+    return AcousticMetricsResponse(
+        duration_seconds=duration_seconds,
+        metrics=metrics,
+        warning=(
+            "Signal/soundscape metrics only — no species similarity search run "
+            "(that needs a reference clip and a Team Workspace channel). "
+            "Level metrics are relative unless a calibration offset was supplied."
+        ),
+    )
+
+
+class StandaloneSimilarityResponse(BaseModel):
+    threshold: float
+    matches: List[AcousticMatch]
+    windows_analyzed: int
+    warning: str
+
+
+@app.post("/acoustic-similarity", response_model=StandaloneSimilarityResponse)
+@limiter.limit("5/minute")
+async def standalone_acoustic_similarity(
+    request: Request,
+    reference_file: UploadFile = File(...),
+    target_file: UploadFile = File(...),
+    threshold: float = Form(0.6),
+):
+    """One-off similarity search for solo Mission Control use — both clips
+    are uploaded together in the same request, the reference embedding is
+    computed and used only for this call, and nothing is written to
+    Mongo. This is the deliberate trade-off of session-only mode: no
+    persisted reference library (so nothing to manage or clean up
+    outside a Team Workspace channel), at the cost of re-uploading the
+    reference clip every time. Embedded-in-a-channel mode still uses the
+    persisted /channels/{id}/acoustic-references + /acoustic-analysis
+    routes for a reusable library."""
+    reference_bytes = await reference_file.read()
+    target_bytes = await target_file.read()
+
+    if len(target_bytes) > MAX_ACOUSTIC_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="Target clip is too large for live analysis — keep it under 20MB")
+
+    try:
+        reference_waveform = load_waveform(reference_bytes)
+        target_waveform = load_waveform(target_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    duration_seconds = len(target_waveform) / SAMPLE_RATE
+    if duration_seconds > MAX_ACOUSTIC_AUDIO_SECONDS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Clips over {MAX_ACOUSTIC_AUDIO_SECONDS}s aren't analyzed live on the free tier — trim it first",
+        )
+
+    try:
+        reference_windows = embed_windows(reference_waveform)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Embedding failed: {exc}")
+    if not reference_windows:
+        raise HTTPException(status_code=400, detail="Reference clip was too short to embed")
+    reference_embedding = np.mean([w[1] for w in reference_windows], axis=0)
+
+    try:
+        matches = find_similar_windows(target_waveform, reference_embedding, threshold=threshold)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Analysis failed: {exc}")
+
+    windows_analyzed = max(1, int(np.ceil(len(target_waveform) / (SAMPLE_RATE * WINDOW_SECONDS))))
+
+    return StandaloneSimilarityResponse(
+        threshold=threshold,
+        matches=[AcousticMatch(**m) for m in matches],
+        windows_analyzed=windows_analyzed,
+        warning="Similarity search only, not a calibrated species classifier — verify matches by ear before citing them.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Acoustic-context tooling — the interspecies-research side of "translation
+# tools", and deliberately NOT a translator. See app/bioacoustics.py's
+# rhythm-comparison section for the full rationale: this lets researchers
+# attach behavioral context (depth, movement, feeding, social activity) to
+# an analyzed clip's rhythm signature, and quantitatively compare timing
+# structure between clips (tempo, "rubato", extra clicks) — the same raw
+# material coda research works from, without claiming to interpret what
+# any of it means.
+#
+# Persisted (POST/GET/DELETE .../acoustic-events, .../compare) only when
+# embedded in a Team Workspace channel — same mine/shared-library pattern
+# as acoustic references and clips. Standalone Mission Control gets the
+# comparison math itself (/acoustic-rhythm-compare) without persistence,
+# consistent with everything else session-only in that context.
+# ---------------------------------------------------------------------------
+
+
+class BehavioralContext(BaseModel):
+    depth_m: float | None = None
+    movement: str | None = None  # freeform: "stationary" | "traveling" | "diving" | "surfacing" | etc.
+    feeding: bool | None = None
+    social: str | None = None  # freeform: "solo" | "social" | etc.
+    notes: str = ""
+
+
+class CreateAcousticEventRequest(BaseModel):
+    label: str = ""
+    created_by: str
+    context: BehavioralContext
+    # The rhythm-relevant slice of an already-computed analyze_soundscape()
+    # result — the frontend passes this straight through from a prior
+    # /acoustic-metrics or /channels/{id}/acoustic-analysis response rather
+    # than re-uploading and re-analyzing the audio just to save it.
+    ici_ms: List[float] = []
+    duration_seconds: float | None = None
+
+
+class AcousticEventResponse(BaseModel):
+    id: str
+    channel_id: str
+    label: str
+    created_by: str
+    created_at: str
+    context: BehavioralContext
+    rhythm_signature: dict
+    ici_ms: List[float]
+
+
+def _event_doc_to_response(doc, channel_id: str) -> AcousticEventResponse:
+    return AcousticEventResponse(
+        id=str(doc["_id"]),
+        channel_id=channel_id,
+        label=doc.get("label", ""),
+        created_by=doc.get("created_by", ""),
+        created_at=doc["created_at"].isoformat() if doc.get("created_at") else "",
+        context=BehavioralContext(**doc.get("context", {})),
+        rhythm_signature=doc.get("rhythm_signature", {}),
+        ici_ms=doc.get("ici_ms", []),
+    )
+
+
+@app.post("/channels/{channel_id}/acoustic-events", response_model=AcousticEventResponse)
+@limiter.limit("20/minute")
+async def create_acoustic_event(request: Request, channel_id: str, payload: CreateAcousticEventRequest):
+    """Saves behavioral context alongside an already-computed rhythm
+    signature, shared with the channel. Doesn't store the audio itself —
+    just the timing data and the researcher's tags — keeping this off
+    Cloudinary's free-tier quota entirely, at the cost of no playback
+    from here later. If audio playback alongside a saved event turns out
+    to matter in practice, that's a real follow-up (upload to Cloudinary
+    the same way clips/snapshots already do), not something assumed
+    unnecessary — just not built speculatively before it's asked for."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    _, channel_doc = _require_channel(db, channel_id)
+    if payload.created_by not in channel_doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can log acoustic events")
+
+    record = {
+        "channel_id": ObjectId(channel_id),
+        "label": payload.label,
+        "created_by": payload.created_by,
+        "created_at": datetime.now(timezone.utc),
+        "context": payload.context.model_dump(),
+        "ici_ms": payload.ici_ms,
+        "rhythm_signature": compute_rhythm_signature(payload.ici_ms),
+    }
+    result = db["acoustic_events"].insert_one(record)
+    record["_id"] = result.inserted_id
+    return _event_doc_to_response(record, channel_id)
+
+
+@app.get("/channels/{channel_id}/acoustic-events", response_model=List[AcousticEventResponse])
+@limiter.limit("30/minute")
+async def list_acoustic_events(request: Request, channel_id: str, requester_email: str):
+    db = get_db()
+    if db is None:
+        return []
+
+    _, channel_doc = _require_channel(db, channel_id)
+    if requester_email not in channel_doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can view acoustic events")
+
+    docs = db["acoustic_events"].find({"channel_id": ObjectId(channel_id)}).sort("created_at", -1)
+    return [_event_doc_to_response(d, channel_id) for d in docs]
+
+
+@app.delete("/acoustic-events/{event_id}")
+@limiter.limit("20/minute")
+async def delete_acoustic_event(request: Request, event_id: str, requested_by: str):
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    try:
+        e_oid = ObjectId(event_id)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid event id")
+    event_doc = db["acoustic_events"].find_one({"_id": e_oid})
+    if event_doc is None:
+        raise HTTPException(status_code=404, detail="Acoustic event not found")
+
+    _, channel_doc = _require_channel(db, str(event_doc["channel_id"]))
+    if requested_by != event_doc.get("created_by") and not _is_admin(channel_doc, requested_by):
+        raise HTTPException(status_code=403, detail="Only the logger or a channel admin can delete this")
+
+    db["acoustic_events"].delete_one({"_id": e_oid})
+    return {"deleted": True}
+
+
+class RhythmCompareResponse(BaseModel):
+    raw_dtw_ms: float | None
+    normalized_dtw: float | None
+    shape_similarity: float | None
+    warning: str
+
+
+@app.get("/channels/{channel_id}/acoustic-events/compare", response_model=RhythmCompareResponse)
+@limiter.limit("30/minute")
+async def compare_acoustic_events(request: Request, channel_id: str, requester_email: str, event_id_a: str, event_id_b: str):
+    """Compares two already-saved events' rhythm signatures — nothing to
+    upload, it's just the stored ici_ms arrays run through DTW."""
+    db = get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="Team workspace is unavailable right now")
+
+    _, channel_doc = _require_channel(db, channel_id)
+    if requester_email not in channel_doc.get("members", []):
+        raise HTTPException(status_code=403, detail="Only channel members can compare acoustic events")
+
+    try:
+        oid_a, oid_b = ObjectId(event_id_a), ObjectId(event_id_b)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid event id")
+
+    doc_a = db["acoustic_events"].find_one({"_id": oid_a, "channel_id": ObjectId(channel_id)})
+    doc_b = db["acoustic_events"].find_one({"_id": oid_b, "channel_id": ObjectId(channel_id)})
+    if doc_a is None or doc_b is None:
+        raise HTTPException(status_code=404, detail="One or both events weren't found in this channel")
+
+    result = compare_rhythm(doc_a.get("ici_ms", []), doc_b.get("ici_ms", []))
+    return RhythmCompareResponse(**result)
+
+
+class StandaloneRhythmCompareRequest(BaseModel):
+    ici_a_ms: List[float]
+    ici_b_ms: List[float]
+
+
+@app.post("/acoustic-rhythm-compare", response_model=RhythmCompareResponse)
+@limiter.limit("30/minute")
+async def standalone_rhythm_compare(request: Request, payload: StandaloneRhythmCompareRequest):
+    """Solo Mission Control path — compares two ICI arrays the frontend
+    already has in-session (from two separate /acoustic-metrics calls),
+    no channel or persistence involved. Pure math on client-supplied
+    numbers, so there's nothing to store or authorize here."""
+    result = compare_rhythm(payload.ici_a_ms, payload.ici_b_ms)
+    return RhythmCompareResponse(**result)
+
+
+# ---------------------------------------------------------------------------
+# Human-language translation — the international-team/literature/fieldwork
+# side of "translation tools", deliberately separate from the bioacoustic
+# similarity search above. See app/translate.py for provider details and
+# the honest gaps (free-tier quality, no historical-text handling).
+# Build order: chat first (this route + Workspace chat wiring), then
+# Species Inspector literature translation, then a dedicated fieldwork/
+# interview tool — each of those is a separate frontend touchpoint but
+# all of them call this one route.
+# ---------------------------------------------------------------------------
+
+
+class TranslateRequest(BaseModel):
+    text: str
+    target_lang: str
+    source_lang: str = "auto"
+
+
+class TranslateResponse(BaseModel):
+    translated_text: str
+    detected_source_lang: str | None = None
+    provider: str
+    warning: str | None = None
+
+
+class LanguageOption(BaseModel):
+    code: str
+    name: str
+
+
+@app.post("/translate", response_model=TranslateResponse)
+@limiter.limit("30/minute")
+async def translate(request: Request, payload: TranslateRequest):
+    """Translates payload.text into payload.target_lang. Shared by every
+    human-language translation touchpoint in the app (Workspace chat,
+    Species Inspector literature, the fieldwork/interview translator) —
+    one route, one provider decision, instead of three divergent ones.
+
+    Uses MyMemory (free, keyless) by default; set DEEPL_API_KEY on the
+    backend for better quality. See app/translate.py for the real
+    trade-offs of each."""
+    if not payload.text.strip():
+        raise HTTPException(status_code=400, detail="text is empty")
+    if len(payload.text) > 20000:
+        raise HTTPException(status_code=413, detail="Text is too long to translate in a single request — split it up")
+
+    try:
+        result = await translate_text(payload.text, payload.target_lang, payload.source_lang)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Translation failed: {exc}")
+
+    return TranslateResponse(**result)
+
+
+@app.get("/translate/languages", response_model=List[LanguageOption])
+@limiter.limit("60/minute")
+def translate_languages(request: Request):
+    """A sane default language list for a picker dropdown — not a
+    validation allowlist. /translate accepts any ISO 639-1 code whether
+    or not it's in this list."""
+    return [LanguageOption(**lang) for lang in COMMON_LANGUAGES]

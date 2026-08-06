@@ -1,7 +1,9 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Avatar from "./Avatar";
-import { FlagIcon, ForwardIcon, PaperclipIcon, PinIcon, ReplyIcon, TrashIcon } from "./icons";
+import { FlagIcon, ForwardIcon, PaperclipIcon, PinIcon, ReplyIcon, TranslateIcon, TrashIcon } from "./icons";
+import { translateText } from "../lib/workspaceApi";
 
 function formatTime(iso) {
   if (!iso) return "";
@@ -61,6 +63,7 @@ export default function MessageRow({
   grouped,
   currentEmail,
   isAdmin,
+  targetLang,
   onReply,
   onForward,
   onTogglePin,
@@ -69,6 +72,46 @@ export default function MessageRow({
 }) {
   const isMe = message.sender_email === currentEmail;
   const canDelete = !message.deleted && (isMe || isAdmin);
+
+  const [translation, setTranslation] = useState(null); // { text, detectedSourceLang, provider, warning } | null
+  const [translating, setTranslating] = useState(false);
+  const [translateError, setTranslateError] = useState(null);
+  const [showTranslation, setShowTranslation] = useState(false);
+
+  // A cached translation is only valid for the target language it was
+  // fetched for — if the channel-wide "translate to" language changes,
+  // drop the stale translation rather than silently showing yesterday's
+  // language for today's picker value.
+  useEffect(() => {
+    setTranslation(null);
+    setShowTranslation(false);
+    setTranslateError(null);
+  }, [targetLang]);
+
+  async function handleTranslate() {
+    if (translation) {
+      // Already translated for this target language — just toggle
+      // visibility rather than re-hitting the API.
+      setShowTranslation((v) => !v);
+      return;
+    }
+    setTranslating(true);
+    setTranslateError(null);
+    try {
+      const result = await translateText({ text: message.text, targetLang });
+      setTranslation({
+        text: result.translated_text,
+        detectedSourceLang: result.detected_source_lang,
+        provider: result.provider,
+        warning: result.warning,
+      });
+      setShowTranslation(true);
+    } catch (err) {
+      setTranslateError(err.message || "Translation failed");
+    } finally {
+      setTranslating(false);
+    }
+  }
 
   return (
     <div
@@ -120,6 +163,19 @@ export default function MessageRow({
                 {message.text}
               </p>
             )}
+            {translating && <p className="text-xs text-[#5a6a72] italic mt-1">Translating…</p>}
+            {translateError && <p className="text-xs text-[#c47a6e] mt-1">{translateError}</p>}
+            {showTranslation && translation && (
+              <div className="mt-1 pl-2 border-l-2 border-[#8fa3ad]/40">
+                <p className="text-sm text-[#d3dbe0] whitespace-pre-wrap break-words leading-relaxed">
+                  {translation.text}
+                </p>
+                <p className="text-[9px] text-[#5a6a72] mt-0.5">
+                  {translation.detectedSourceLang ? `${translation.detectedSourceLang} → ${targetLang}` : `→ ${targetLang}`}
+                  {translation.warning ? " · machine translation, unverified" : ""}
+                </p>
+              </div>
+            )}
             {message.attachments?.map((a, i) => (
               <AttachmentView key={`${a.url}-${i}`} attachment={a} />
             ))}
@@ -135,6 +191,14 @@ export default function MessageRow({
           <ActionButton title="Forward" onClick={() => onForward(message)}>
             <ForwardIcon />
           </ActionButton>
+          {message.text && (
+            <ActionButton
+              title={translation ? (showTranslation ? "Hide translation" : "Show translation") : `Translate to ${targetLang}`}
+              onClick={handleTranslate}
+            >
+              <TranslateIcon />
+            </ActionButton>
+          )}
           <ActionButton title={message.pinned ? "Unpin" : "Pin"} onClick={() => onTogglePin(message)}>
             <PinIcon />
           </ActionButton>

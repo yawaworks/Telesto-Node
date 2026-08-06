@@ -82,3 +82,11 @@ export function WaveformIcon({ className = "w-4 h-4" }) {
     </svg>
   );
 }
+export function TranslateIcon({ className = "w-3.5 h-3.5" }) {
+  return (
+    <svg {...base} className={className} stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 5h9M7.5 3v2M4 8c1.5 3 4 5 7 6M11 8c-1 3-3.5 5.5-7 7" />
+      <path d="M14 21l4-9 4 9M15.3 18h5.4" />
+    </svg>
+  );
+}
