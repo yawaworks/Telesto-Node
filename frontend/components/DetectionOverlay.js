@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
+import { listTranslationLanguages, translateText } from "../lib/workspaceApi";
+import { TranslateIcon } from "./icons";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:5050";
 
@@ -87,6 +89,67 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [], onV
   const [speciesData, setSpeciesData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [fetchError, setFetchError] = useState(null);
+
+  // Translates speciesData.summary (the Wikipedia-derived literature
+  // text) on request — see backend/app/translate.py. Session-only
+  // language preference, same default-from-browser-locale pattern as
+  // Workspace chat's translate picker. Resets whenever a new species is
+  // selected, since a cached translation of the previous species'
+  // summary would be actively wrong shown against this one.
+  const [languages, setLanguages] = useState([{ code: "en", name: "English" }]);
+  const [targetLang, setTargetLang] = useState(() => {
+    if (typeof navigator !== "undefined" && navigator.language) {
+      const short = navigator.language.split("-")[0];
+      if (short && short.length === 2) return short;
+    }
+    return "en";
+  });
+  const [translation, setTranslation] = useState(null);
+  const [translating, setTranslating] = useState(false);
+  const [translateError, setTranslateError] = useState(null);
+  const [showTranslation, setShowTranslation] = useState(false);
+
+  useEffect(() => {
+    listTranslationLanguages()
+      .then(setLanguages)
+      .catch((err) => console.error("Failed to load translation languages:", err));
+  }, []);
+
+  function resetTranslation() {
+    setTranslation(null);
+    setTranslating(false);
+    setTranslateError(null);
+    setShowTranslation(false);
+  }
+
+  async function handleTranslateSummary() {
+    if (!speciesData?.summary) return;
+    if (translation) {
+      setShowTranslation((v) => !v);
+      return;
+    }
+    setTranslating(true);
+    setTranslateError(null);
+    try {
+      const result = await translateText({ text: speciesData.summary, targetLang });
+      setTranslation({
+        text: result.translated_text,
+        detectedSourceLang: result.detected_source_lang,
+        warning: result.warning,
+      });
+      setShowTranslation(true);
+    } catch (err) {
+      setTranslateError(err.message || "Translation failed");
+    } finally {
+      setTranslating(false);
+    }
+  }
+
+  // A cached translation is only valid for the target language it was
+  // fetched for.
+  useEffect(() => {
+    resetTranslation();
+  }, [targetLang]);
 
   const abortRef = useRef(null);
 
@@ -346,6 +409,7 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [], onV
     setLoading(true);
     setFetchError(null);
     setSpeciesData(null);
+    resetTranslation();
 
     fetch(`${API_BASE_URL}/species-info?name=${encodeURIComponent(label)}`, {
       signal: controller.signal,
@@ -405,6 +469,7 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [], onV
     setFetchError(null);
     setImageTab("insitu");
     setActiveImageIndex(0);
+    resetTranslation();
     if (abortRef.current) abortRef.current.abort();
     videoRef.current?.play().catch(() => {});
   }
@@ -491,7 +556,50 @@ export default function DetectionOverlay({ videoRef, boxes, ghostBoxes = [], onV
                         <span className="text-[#5a6a72]"> (IUCN Red List)</span>
                       </p>
                     )}
-                    {speciesData.summary && <p className="pt-1">{speciesData.summary}</p>}
+                    {speciesData.summary && (
+                      <div className="pt-1">
+                        <p>{speciesData.summary}</p>
+                        <div className="flex items-center gap-1.5 mt-1.5">
+                          <TranslateIcon className="w-3 h-3 text-[#5a6a72] shrink-0" />
+                          <select
+                            value={targetLang}
+                            onChange={(e) => setTargetLang(e.target.value)}
+                            className="bg-transparent border border-[#3a444a] rounded px-1 py-0.5 text-[9px] uppercase tracking-wide text-[#8fa3ad] outline-none focus:border-[#8fa3ad] cursor-pointer"
+                          >
+                            {languages.map((lang) => (
+                              <option key={lang.code} value={lang.code} className="bg-[#1c2226] text-[#d3dbe0]">
+                                {lang.name}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            onClick={handleTranslateSummary}
+                            disabled={translating}
+                            className="text-[9px] uppercase tracking-widest text-[#8fa3ad] hover:text-[#d3dbe0] disabled:opacity-50"
+                          >
+                            {translating
+                              ? "Translating…"
+                              : translation
+                              ? showTranslation
+                                ? "Hide translation"
+                                : "Show translation"
+                              : "Translate"}
+                          </button>
+                        </div>
+                        {translateError && <p className="text-[#c47a6e] mt-1">{translateError}</p>}
+                        {showTranslation && translation && (
+                          <div className="mt-1.5 pl-2 border-l-2 border-[#8fa3ad]/40">
+                            <p className="text-[#d3dbe0]">{translation.text}</p>
+                            <p className="text-[9px] text-[#5a6a72] mt-0.5">
+                              {translation.detectedSourceLang
+                                ? `${translation.detectedSourceLang} → ${targetLang}`
+                                : `→ ${targetLang}`}
+                              {translation.warning ? " · machine translation, unverified" : ""}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {onViewDistribution && speciesData.scientific_name && (
