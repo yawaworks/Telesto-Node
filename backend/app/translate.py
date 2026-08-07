@@ -44,8 +44,38 @@ DEEPL_API_URL = "https://api-free.deepl.com/v2/translate"
 MYMEMORY_API_URL = "https://api.mymemory.translated.net/get"
 # The "polite pool" contact email pattern, reused from species_info.py —
 # MyMemory raises its free rate limit 10x (5,000 -> 50,000 words/day) when
-# a contact address is included with the request.
-MYMEMORY_CONTACT_EMAIL = "yashikayapsandworks@gmail.com"
+# a contact address is included with the request. Unset by default
+# rather than hardcoded — set MYMEMORY_CONTACT_EMAIL on the backend to
+# opt in to the higher limit. Omitted entirely from the request (not
+# sent as an empty string) when unset, so an unset value can't
+# accidentally read as "de=" to MyMemory's API.
+MYMEMORY_CONTACT_EMAIL = os.getenv("MYMEMORY_CONTACT_EMAIL", "")
+
+# Lingva Translate — a keyless, no-signup frontend for Google Translate's
+# engine, run by volunteers as alternative instances of an open-source
+# project (https://github.com/thedaviddelta/lingva-translate). No API
+# key exists for it, ever — there's nothing to apply for or get denied.
+# The trade-off for that: it depends on a third-party-hosted public
+# instance staying up, which isn't guaranteed the way a paid/registered
+# API is. LINGVA_INSTANCE_URL lets a different instance be swapped in
+# (see https://github.com/thedaviddelta/lingva-translate#instances for
+# other public instances) if the default one goes down or starts
+# rate-limiting. This module's response parsing for Lingva is written
+# from its documented API shape, not verified against a live response
+# from this environment (its domain wasn't reachable from here to test
+# against) — same honesty flag as this app's GFW vessel-tracking
+# integration; if it 404s or the JSON shape doesn't match, that's the
+# first thing to check against the project's current docs, not a sign
+# the whole approach is wrong.
+LINGVA_INSTANCE_URL = os.getenv("LINGVA_INSTANCE_URL", "https://lingva.ml")
+
+# Explicit override for which keyless provider to try first — "lingva"
+# (default) or "mymemory". Only matters when DEEPL_API_KEY is unset.
+# Whichever one isn't picked here still gets used as an automatic
+# fallback if the first choice's request fails outright (see
+# translate_text below) — so setting this doesn't remove the other
+# option, just decides which one is tried first.
+TRANSLATE_PROVIDER = os.getenv("TRANSLATE_PROVIDER", "lingva")
 
 # MyMemory recommends staying well under ~500 chars per request; DeepL's
 # free tier comfortably handles much larger single requests. Both are
@@ -56,6 +86,13 @@ MYMEMORY_CONTACT_EMAIL = "yashikayapsandworks@gmail.com"
 MAX_CHUNK_CHARS = {
     "mymemory": 450,
     "deepl": 4500,
+    # Lingva proxies Google Translate's own web endpoint, which handles
+    # much longer single requests than MyMemory's free tier — kept
+    # conservative (not pushed to Google's actual much-higher limit)
+    # since this is an unverified integration; smaller requests fail
+    # more predictably than large ones if something about the shape is
+    # off.
+    "lingva": 1800,
 }
 
 # Keyed on (text, target_lang, source_lang, provider) -> (translated_text, detected_source, timestamp).
@@ -68,7 +105,27 @@ _CACHE_TTL_SECONDS = 60 * 60 * 24  # 24h
 
 
 def _active_provider() -> str:
-    return "deepl" if DEEPL_API_KEY else "mymemory"
+    if DEEPL_API_KEY:
+        return "deepl"
+    if TRANSLATE_PROVIDER in ("lingva", "mymemory"):
+        return TRANSLATE_PROVIDER
+    return "lingva"
+
+
+def _fallback_provider(primary: str) -> str | None:
+    """The other keyless provider — tried automatically if the primary
+    one's request fails outright (network error, non-2xx, unexpected
+    response shape), so a single provider having a bad day doesn't take
+    down every translation touchpoint in the app. Returns None when the
+    primary is deepl (a paid/registered key means the person explicitly
+    chose reliability over the keyless options; silently falling back to
+    a lower-quality provider on a transient DeepL hiccup would be a
+    worse surprise than just surfacing the error)."""
+    if primary == "lingva":
+        return "mymemory"
+    if primary == "mymemory":
+        return "lingva"
+    return None
 
 
 def _chunk_text(text: str, max_chars: int) -> list[str]:
@@ -139,7 +196,9 @@ async def _translate_chunk_mymemory(client: httpx.AsyncClient, text: str, target
     # translate_text() call-site.
     source_segment = "" if (not source_lang or source_lang == "auto") else source_lang
     lang_pair = f"{source_segment}|{target_lang}"
-    params = {"q": text, "langpair": lang_pair, "de": MYMEMORY_CONTACT_EMAIL}
+    params = {"q": text, "langpair": lang_pair}
+    if MYMEMORY_CONTACT_EMAIL:
+        params["de"] = MYMEMORY_CONTACT_EMAIL
 
     resp = await client.get(MYMEMORY_API_URL, params=params, headers=REQUEST_HEADERS)
     resp.raise_for_status()
@@ -158,6 +217,67 @@ async def _translate_chunk_mymemory(client: httpx.AsyncClient, text: str, target
     return {"translated_text": translated, "detected_source_lang": detected}
 
 
+async def _translate_chunk_lingva(client: httpx.AsyncClient, text: str, target_lang: str, source_lang: str | None) -> dict:
+    # Lingva's documented REST shape: GET /api/v1/{source}/{target}/{text},
+    # with the text URL-path-encoded (not a query param) and "auto" as a
+    # literal accepted source code — no MyMemory-style empty-segment quirk
+    # here. httpx handles path-segment encoding via the url object rather
+    # than manual quoting, since raw "/" or "%" characters in the source
+    # text need correct encoding to survive as one path segment.
+    source_segment = source_lang if source_lang else "auto"
+    url = f"{LINGVA_INSTANCE_URL}/api/v1/{source_segment}/{target_lang}/{text}"
+
+    resp = await client.get(url, headers=REQUEST_HEADERS)
+    resp.raise_for_status()
+    data = resp.json()
+
+    translated = data.get("translation")
+    if translated is None:
+        raise RuntimeError(f"Unexpected Lingva response shape: {data}")
+
+    # Lingva's response includes detected info under different keys
+    # across versions/instances (some expose "info"->"detectedSource",
+    # others don't surface it at all) — read defensively, fall back to
+    # not knowing rather than guessing.
+    detected = None
+    info = data.get("info")
+    if isinstance(info, dict):
+        detected = info.get("detectedSource")
+
+    return {"translated_text": translated, "detected_source_lang": detected}
+
+
+async def _translate_chunk(client: httpx.AsyncClient, provider: str, text: str, target_lang: str, source_lang: str | None) -> dict:
+    if provider == "deepl":
+        return await _translate_chunk_deepl(client, text, target_lang, source_lang)
+    if provider == "lingva":
+        return await _translate_chunk_lingva(client, text, target_lang, source_lang)
+    return await _translate_chunk_mymemory(client, text, target_lang, source_lang)
+
+
+async def _translate_all_chunks(provider: str, text: str, target_lang: str, source_lang: str | None) -> tuple[str, str | None]:
+    """Chunks text to the given provider's size limit and translates
+    every chunk with that one provider — no mixing providers mid-text,
+    since a fallback only kicks in when the FIRST chunk request fails
+    (see translate_text), at which point the whole call restarts fresh
+    against the fallback provider rather than continuing with a
+    half-mymemory, half-lingva result."""
+    max_chars = MAX_CHUNK_CHARS[provider]
+    chunks = _chunk_text(text, max_chars)
+
+    translated_parts = []
+    detected_source = None
+    async with httpx.AsyncClient(timeout=15) as client:
+        for chunk in chunks:
+            result = await _translate_chunk(client, provider, chunk, target_lang, source_lang)
+            translated_parts.append(result["translated_text"])
+            if result.get("detected_source_lang") and not detected_source:
+                detected_source = result["detected_source_lang"]
+
+    translated_text = " ".join(translated_parts) if len(chunks) > 1 else translated_parts[0]
+    return translated_text, detected_source
+
+
 async def translate_text(
     text: str,
     target_lang: str,
@@ -170,51 +290,59 @@ async def translate_text(
     autodetects poorly).
 
     Returns {translated_text, detected_source_lang, provider, warning}.
-    Raises on total failure (both chunk translation and the caller
-    should decide how to surface that — this module doesn't swallow
-    errors into a fake success).
+    Raises only if the primary provider AND its keyless fallback both
+    fail (see _fallback_provider) — this module doesn't swallow errors
+    into a fake success, but it does try the other free option once
+    before giving up, since both MyMemory and Lingva are volunteer/
+    community-tier services that can have a bad day independent of
+    whether this code is correct.
     """
     text = text.strip()
+    primary = _active_provider()
     if not text:
-        return {"translated_text": "", "detected_source_lang": None, "provider": _active_provider(), "warning": None}
+        return {"translated_text": "", "detected_source_lang": None, "provider": primary, "warning": None}
 
-    provider = _active_provider()
-    cache_key = (text, target_lang, source_lang, provider)
+    cache_key = (text, target_lang, source_lang, primary)
     cached = _cache.get(cache_key)
     if cached and (time.time() - cached[2]) < _CACHE_TTL_SECONDS:
         translated_text, detected_source, _ = cached
         return {
             "translated_text": translated_text,
             "detected_source_lang": detected_source,
-            "provider": provider,
+            "provider": primary,
             "warning": None,
         }
 
-    max_chars = MAX_CHUNK_CHARS[provider]
-    chunks = _chunk_text(text, max_chars)
+    provider = primary
+    fallback_used = False
+    try:
+        translated_text, detected_source = await _translate_all_chunks(provider, text, target_lang, source_lang)
+    except Exception as primary_exc:
+        fallback = _fallback_provider(primary)
+        if fallback is None:
+            raise
+        try:
+            translated_text, detected_source = await _translate_all_chunks(fallback, text, target_lang, source_lang)
+            provider = fallback
+            fallback_used = True
+        except Exception:
+            # Report the primary's failure, not the fallback's — the
+            # primary is the one the deployment is actually configured
+            # to use, so its error is the more actionable one to surface.
+            raise primary_exc
 
-    translated_parts = []
-    detected_source = None
-    async with httpx.AsyncClient(timeout=15) as client:
-        for chunk in chunks:
-            if provider == "deepl":
-                result = await _translate_chunk_deepl(client, chunk, target_lang, source_lang)
-            else:
-                result = await _translate_chunk_mymemory(client, chunk, target_lang, source_lang)
-            translated_parts.append(result["translated_text"])
-            if result.get("detected_source_lang") and not detected_source:
-                detected_source = result["detected_source_lang"]
-
-    translated_text = " ".join(translated_parts) if len(chunks) > 1 else translated_parts[0]
+    cache_key = (text, target_lang, source_lang, provider)
     _cache[cache_key] = (translated_text, detected_source, time.time())
 
     warning = None
-    if provider == "mymemory":
+    if provider in ("mymemory", "lingva"):
+        provider_label = "MyMemory" if provider == "mymemory" else "Lingva (Google Translate proxy)"
+        fallback_note = f" ({primary} failed, fell back to {provider})" if fallback_used else ""
         warning = (
-            "Free-tier machine translation (MyMemory) — reliable for common "
-            "language pairs and modern text, not verified for technical/legal "
-            "precision or historical/archaic language. Set DEEPL_API_KEY on "
-            "the backend for higher-quality translation."
+            f"Free, keyless machine translation ({provider_label}){fallback_note} — reliable for "
+            "common language pairs and modern text, not verified for technical/legal precision or "
+            "historical/archaic language. Set DEEPL_API_KEY on the backend for higher-quality "
+            "translation."
         )
 
     return {
