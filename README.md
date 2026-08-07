@@ -89,13 +89,13 @@ scripts/
 | `S2_API_KEY` | No | Semantic Scholar — free key, approval required |
 | `BHL_API_KEY` | No | Biodiversity Heritage Library — free, instant |
 | `IUCN_API_KEY` | No | IUCN Red List — free, instant |
-| `DEEPL_API_KEY` | No | Human-language translation upgrade — free keyless Lingva provider used when unset |
-| `TRANSLATE_PROVIDER` | No | `lingva` (default) or `mymemory` — which keyless provider to try first |
-| `LINGVA_INSTANCE_URL` | No | Override if the default public Lingva instance is down |
+| `DEEPL_API_KEY` | No | Human-language translation upgrade — free keyless MyMemory provider used when unset |
+| `TRANSLATE_PROVIDER` | No | `mymemory` (default) or `lingva` (opt-in — public instances have shown 403s in real testing) |
+| `LINGVA_INSTANCE_URL` | No | Only relevant if using Lingva — override if the default public instance is down |
 | `ALLOWED_VIDEO_HOSTS` | No | Comma-separated extra hosts for `/proxy-video` |
 | `FRONTEND_ORIGIN` | Yes | For CORS |
 
-All three optional research-API keys degrade gracefully when unset — the Species Inspector just shows less (no diagrams tab, no conservation badge), never errors. Translation degrades differently: it never turns off. With no `DEEPL_API_KEY`, it uses Lingva (a keyless Google Translate proxy) by default, with MyMemory as an automatic fallback if Lingva's request fails — and vice versa if `TRANSLATE_PROVIDER=mymemory` is set. Neither Lingva nor MyMemory needs a key or signup of any kind; DeepL is the only provider here that does.
+All three optional research-API keys degrade gracefully when unset — the Species Inspector just shows less (no diagrams tab, no conservation badge), never errors. Translation degrades differently: it never turns off. With no `DEEPL_API_KEY`, source language is detected locally (via `langdetect`, fully offline — no external autodetect service to depend on) and translated via MyMemory, with Lingva available as an opt-in alternative/fallback. Neither MyMemory nor Lingva needs a key or signup of any kind; DeepL is the only provider here that does. One known gap: local detection needs ~20+ characters of text to be reliable (shorter than that, `langdetect` gives confidently wrong guesses, not just uncertain ones) — very short messages fall through to whichever provider can still attempt real autodetect.
 
 ### Frontend (Vercel)
 
