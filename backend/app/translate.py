@@ -191,41 +191,36 @@ def _resolve_source_lang(text: str, source_lang: str | None) -> tuple[str | None
 def _active_provider(source_lang: str | None = None) -> str:
     """source_lang here should already be the RESOLVED value from
     _resolve_source_lang — a real code, or None only when local
-    detection couldn't read the text at all. MyMemory needs a real code
-    (see _translate_chunk_mymemory); when source_lang is still None at
-    this point, only DeepL or Lingva (both real-autodetect-capable) are
-    viable, so this routes to Lingva as the last free option rather than
-    a MyMemory call already known to fail."""
+    detection couldn't read the text at all (too short/ambiguous).
+
+    Does NOT auto-route to Lingva for unresolved short text anymore —
+    two real 403 Forbidden errors from Lingva's public instances in
+    actual deployed use (see this module's docstring) is enough evidence
+    it isn't a safe thing to silently fall into, even as a last resort.
+    translate_text() below raises a clear, actionable error for the
+    unresolved-source case instead of attempting a request already twice
+    confirmed to fail."""
     if DEEPL_API_KEY:
         return "deepl"
-    provider = TRANSLATE_PROVIDER if TRANSLATE_PROVIDER in ("lingva", "mymemory") else "mymemory"
-    if provider == "mymemory" and not source_lang:
-        return "lingva"
-    return provider
+    return TRANSLATE_PROVIDER if TRANSLATE_PROVIDER in ("lingva", "mymemory") else "mymemory"
 
 
 def _fallback_provider(primary: str, source_lang: str | None = None) -> str | None:
-    """The other keyless provider — tried automatically if the primary
-    one's request fails outright (network error, non-2xx, unexpected
-    response shape), so a single provider having a bad day doesn't take
-    down every translation touchpoint in the app. Returns None when the
-    primary is deepl (a paid/registered key means the person explicitly
-    chose reliability over the keyless options; silently falling back to
-    a lower-quality provider on a transient DeepL hiccup would be a
-    worse surprise than just surfacing the error).
+    """Only ever falls back FROM lingva TO mymemory, never the reverse.
 
-    Also returns None instead of "mymemory" when source_lang is still
-    unresolved (local detection couldn't read the text) — MyMemory can't
-    do autodetect (see _translate_chunk_mymemory), so proposing it as a
-    fallback here would just be a second guaranteed failure instead of a
-    real second attempt.
+    Two real 403 Forbidden errors from Lingva's public instances (see
+    this module's docstring) is enough evidence it isn't a safe
+    automatic fallback destination — if MyMemory's request fails, that
+    error surfaces directly and honestly instead of being masked behind
+    a second attempt against a provider already known to be unreliable
+    from this hosting environment.
+
+    Requires source_lang to already be resolved either way — MyMemory
+    can't autodetect, so there's nothing useful to fall back to for
+    text local detection couldn't read.
     """
-    if primary == "lingva":
-        if not source_lang:
-            return None
+    if primary == "lingva" and source_lang:
         return "mymemory"
-    if primary == "mymemory":
-        return "lingva"
     return None
 
 
@@ -429,6 +424,23 @@ async def translate_text(
     else:
         effective_source, detected_locally = _resolve_source_lang(text, source_lang)
         provider = _active_provider(effective_source)
+
+        if provider == "mymemory" and not effective_source:
+            # Fails fast and clearly instead of silently trying Lingva —
+            # its public instances have returned 403 Forbidden on real
+            # requests from this backend twice, so that's no longer a
+            # safe automatic fallback for this case (see
+            # _active_provider's docstring). The honest fix here is
+            # asking for a known source language, not another attempt
+            # against a provider already confirmed unreliable.
+            raise RuntimeError(
+                f"Couldn't reliably auto-detect the source language locally — this text is "
+                f"{len(text)} characters, and local detection needs at least "
+                f"{MIN_CHARS_FOR_LOCAL_DETECTION} to be reliable (see _detect_language_locally). "
+                "Pass an explicit source_lang, or use more text. Lingva could theoretically "
+                "autodetect this, but its public instances have returned 403 Forbidden on real "
+                "requests from this backend — not currently a working fallback."
+            )
 
     cache_key = (text, target_lang, source_lang, provider)
     cached = _cache.get(cache_key)
