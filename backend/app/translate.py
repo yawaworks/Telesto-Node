@@ -104,15 +104,25 @@ _cache = {}
 _CACHE_TTL_SECONDS = 60 * 60 * 24  # 24h
 
 
-def _active_provider() -> str:
+def _active_provider(source_lang: str | None = None) -> str:
     if DEEPL_API_KEY:
         return "deepl"
-    if TRANSLATE_PROVIDER in ("lingva", "mymemory"):
-        return TRANSLATE_PROVIDER
-    return "lingva"
+    provider = TRANSLATE_PROVIDER if TRANSLATE_PROVIDER in ("lingva", "mymemory") else "lingva"
+    # MyMemory has no working autodetect (confirmed via a real 403
+    # INVALID LANGUAGE PAIR error — see _translate_chunk_mymemory).
+    # Autodetect is also this app's overwhelmingly common case, since
+    # every UI touchpoint (chat, Species Inspector, fieldwork translator)
+    # defaults source_lang to "auto" unless the person explicitly picks
+    # a source language. Rather than let every one of those calls fail
+    # and fall back, route them straight to Lingva — which does support
+    # "auto" — so MyMemory is only ever asked to do the one thing it can
+    # actually do: translate a known source language.
+    if provider == "mymemory" and (not source_lang or source_lang == "auto"):
+        return "lingva"
+    return provider
 
 
-def _fallback_provider(primary: str) -> str | None:
+def _fallback_provider(primary: str, source_lang: str | None = None) -> str | None:
     """The other keyless provider — tried automatically if the primary
     one's request fails outright (network error, non-2xx, unexpected
     response shape), so a single provider having a bad day doesn't take
@@ -120,8 +130,17 @@ def _fallback_provider(primary: str) -> str | None:
     primary is deepl (a paid/registered key means the person explicitly
     chose reliability over the keyless options; silently falling back to
     a lower-quality provider on a transient DeepL hiccup would be a
-    worse surprise than just surfacing the error)."""
+    worse surprise than just surfacing the error).
+
+    Also returns None instead of "mymemory" when source_lang is
+    autodetect — MyMemory can't do autodetect (see
+    _translate_chunk_mymemory), so proposing it as a fallback for an
+    autodetect request would just be a second guaranteed failure instead
+    of a real second attempt.
+    """
     if primary == "lingva":
+        if not source_lang or source_lang == "auto":
+            return None
         return "mymemory"
     if primary == "mymemory":
         return "lingva"
@@ -189,13 +208,27 @@ async def _translate_chunk_deepl(client: httpx.AsyncClient, text: str, target_la
 
 
 async def _translate_chunk_mymemory(client: httpx.AsyncClient, text: str, target_lang: str, source_lang: str | None) -> dict:
-    # MyMemory's documented auto-detect convention is an empty source
-    # before the pipe (e.g. "|es"), not a literal "auto"/"autodetect"
-    # token — that's a MyMemory-specific quirk, not a general REST
-    # translation convention, so it's handled here rather than at the
-    # translate_text() call-site.
-    source_segment = "" if (not source_lang or source_lang == "auto") else source_lang
-    lang_pair = f"{source_segment}|{target_lang}"
+    # CONFIRMED (via a real 403 "INVALID LANGUAGE PAIR SPECIFIED" error,
+    # not just inferred): MyMemory does NOT support an empty source
+    # segment for autodetect the way this module previously assumed —
+    # that was an unverified guess that turned out wrong. MyMemory
+    # requires a real two-letter source code in every request. There is
+    # no known reliable autodetect path for MyMemory specifically, so
+    # this fails fast with a clear, specific error rather than sending a
+    # request already known to be rejected — translate_text() below
+    # routes auto-detect requests to Lingva instead (which does
+    # genuinely support "auto") and only calls this function when a real
+    # source_lang is already known, so this branch should be rare in
+    # practice, not the common path it was before this fix.
+    if not source_lang or source_lang == "auto":
+        raise RuntimeError(
+            "MyMemory requires an explicit source language and does not support autodetect "
+            "(confirmed via a real 403 INVALID LANGUAGE PAIR error) — this should have been "
+            "routed to Lingva instead; if you're seeing this, translate_text()'s auto-detect "
+            "routing didn't catch this call."
+        )
+
+    lang_pair = f"{source_lang}|{target_lang}"
     params = {"q": text, "langpair": lang_pair}
     if MYMEMORY_CONTACT_EMAIL:
         params["de"] = MYMEMORY_CONTACT_EMAIL
@@ -209,11 +242,11 @@ async def _translate_chunk_mymemory(client: httpx.AsyncClient, text: str, target
         raise RuntimeError(f"MyMemory returned status {status}: {data.get('responseDetails')}")
 
     translated = data["responseData"]["translatedText"]
-    # MyMemory doesn't report detected source language in the response
-    # body the way DeepL does — if the caller asked for autodetect, we
-    # genuinely don't know what it detected, and say so rather than
-    # guessing.
-    detected = source_lang if source_lang and source_lang != "auto" else None
+    # source_lang is guaranteed non-empty/non-"auto" here (the guard
+    # clause above raises otherwise), so this just echoes back the known
+    # source rather than reporting an actual detection MyMemory doesn't
+    # provide.
+    detected = source_lang
     return {"translated_text": translated, "detected_source_lang": detected}
 
 
@@ -298,7 +331,7 @@ async def translate_text(
     whether this code is correct.
     """
     text = text.strip()
-    primary = _active_provider()
+    primary = _active_provider(source_lang)
     if not text:
         return {"translated_text": "", "detected_source_lang": None, "provider": primary, "warning": None}
 
@@ -318,7 +351,7 @@ async def translate_text(
     try:
         translated_text, detected_source = await _translate_all_chunks(provider, text, target_lang, source_lang)
     except Exception as primary_exc:
-        fallback = _fallback_provider(primary)
+        fallback = _fallback_provider(primary, source_lang)
         if fallback is None:
             raise
         try:
